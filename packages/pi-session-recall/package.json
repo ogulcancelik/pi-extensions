@@ -1,0 +1,39 @@
+{
+  "name": "@ogulcancelik/pi-session-recall",
+  "version": "1.0.1",
+  "description": "Search and query past pi sessions. Recall previous conversations on demand.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "session-recall",
+    "session-search",
+    "conversation-history",
+    "agent-memory",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-session-recall"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-session-recall#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./session-recall.ts"
+    ]
+  },
+  "files": [
+    "session-recall.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

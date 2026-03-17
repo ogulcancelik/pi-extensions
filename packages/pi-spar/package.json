@@ -1,0 +1,41 @@
+{
+  "name": "@ogulcancelik/pi-spar",
+  "version": "0.1.0",
+  "description": "Agent-to-agent sparring for pi. Back-and-forth conversations with peer AI models for debugging, design review, and challenging your thinking.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "spar",
+    "agent-to-agent",
+    "peer-review",
+    "coding-agent",
+    "multi-model"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-spar"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-spar#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "core.ts",
+    "peek.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

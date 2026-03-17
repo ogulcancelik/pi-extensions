@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>pi sketch</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #1a1a1a;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding: 20px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      color: #888;
+      font-size: 14px;
+    }
+    .toolbar button {
+      background: #333;
+      color: #fff;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .toolbar button:hover { background: #444; }
+    .toolbar button.primary { background: #2563eb; }
+    .toolbar button.primary:hover { background: #1d4ed8; }
+    .brush-sizes {
+      display: flex;
+      gap: 6px;
+    }
+    .brush-size {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      border: 2px solid transparent;
+    }
+    .brush-size:hover { background: #444; }
+    .brush-size.active { border-color: #2563eb; }
+    .brush-size .dot {
+      background: #fff;
+      border-radius: 50%;
+    }
+    .colors {
+      display: flex;
+      gap: 4px;
+    }
+    .color-btn {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 2px solid transparent;
+    }
+    .color-btn:hover { opacity: 0.8; }
+    .color-btn.active { border-color: #fff; }
+    .canvas-container {
+      position: relative;
+      display: inline-block;
+    }
+    canvas {
+      background: #fff;
+      border-radius: 8px;
+      cursor: crosshair;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+    .resize-handle {
+      position: absolute;
+      bottom: 4px;
+      right: 4px;
+      width: 16px;
+      height: 16px;
+      cursor: nwse-resize;
+      background: linear-gradient(135deg, transparent 50%, #666 50%);
+      border-radius: 0 0 6px 0;
+      opacity: 0.7;
+    }
+    .resize-handle:hover {
+      opacity: 1;
+    }
+    .hint {
+      color: #666;
+      font-size: 13px;
+    }
+    kbd {
+      background: #333;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="colors">
+      <div class="color-btn active" data-color="#000000" style="background: #000;" title="Black"></div>
+      <div class="color-btn" data-color="#ef4444" style="background: #ef4444;" title="Red"></div>
+      <div class="color-btn" data-color="#22c55e" style="background: #22c55e;" title="Green"></div>
+      <div class="color-btn" data-color="#3b82f6" style="background: #3b82f6;" title="Blue"></div>
+      <div class="color-btn" data-color="#ffffff" style="background: #fff;" title="White (eraser)"></div>
+    </div>
+    <div class="brush-sizes">
+      <div class="brush-size" data-size="2" title="Small">
+        <div class="dot" style="width: 4px; height: 4px;"></div>
+      </div>
+      <div class="brush-size active" data-size="4" title="Medium">
+        <div class="dot" style="width: 8px; height: 8px;"></div>
+      </div>
+      <div class="brush-size" data-size="8" title="Large">
+        <div class="dot" style="width: 14px; height: 14px;"></div>
+      </div>
+    </div>
+    <button onclick="clearCanvas()">Clear</button>
+    <button onclick="undo()">Undo</button>
+    <button class="primary" onclick="send()">Send</button>
+    <button onclick="cancel()">Cancel</button>
+  </div>
+  
+  <div class="canvas-container">
+    <canvas id="canvas" width="1000" height="600"></canvas>
+    <div class="resize-handle" id="resizeHandle"></div>
+  </div>
+  
+  <div class="hint">
+    <kbd>Ctrl+V</kbd> paste image · <kbd>Enter</kbd> send · <kbd>Esc</kbd> cancel · <kbd>C</kbd> clear · <kbd>Z</kbd> undo · <kbd>1-3</kbd> brush size
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let drawing = false;
+    let brushSize = 4;
+    let brushColor = '#000000';
+    let history = [];
+    let lastX, lastY;
+    
+    // Save initial blank state
+    saveState();
+    
+    function saveState() {
+      history.push(canvas.toDataURL());
+      if (history.length > 50) history.shift(); // Limit history
+    }
+    
+    function undo() {
+      if (history.length > 1) {
+        history.pop(); // Remove current state
+        const img = new Image();
+        img.onload = () => {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0);
+        };
+        img.src = history[history.length - 1];
+      }
+    }
+    
+    const DEFAULT_WIDTH = 1000;
+    const DEFAULT_HEIGHT = 600;
+    
+    function clearCanvas() {
+      canvas.width = DEFAULT_WIDTH;
+      canvas.height = DEFAULT_HEIGHT;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      saveState();
+    }
+    
+    function getPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      return {
+        x: (e.clientX - rect.left) * scaleX,
+        y: (e.clientY - rect.top) * scaleY
+      };
+    }
+    
+    canvas.addEventListener('mousedown', (e) => {
+      drawing = true;
+      const pos = getPos(e);
+      lastX = pos.x;
+      lastY = pos.y;
+      
+      // Draw a dot for single clicks
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, brushSize / 2, 0, Math.PI * 2);
+      ctx.fillStyle = brushColor;
+      ctx.fill();
+    });
+    
+    canvas.addEventListener('mousemove', (e) => {
+      if (!drawing) return;
+      const pos = getPos(e);
+      
+      ctx.beginPath();
+      ctx.moveTo(lastX, lastY);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.strokeStyle = brushColor;
+      ctx.lineWidth = brushSize;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+      
+      lastX = pos.x;
+      lastY = pos.y;
+    });
+    
+    canvas.addEventListener('mouseup', () => {
+      if (drawing) {
+        drawing = false;
+        saveState();
+      }
+    });
+    
+    canvas.addEventListener('mouseleave', () => {
+      if (drawing) {
+        drawing = false;
+        saveState();
+      }
+    });
+    
+    // Brush size selection
+    document.querySelectorAll('.brush-size').forEach(el => {
+      el.addEventListener('click', () => {
+        document.querySelectorAll('.brush-size').forEach(b => b.classList.remove('active'));
+        el.classList.add('active');
+        brushSize = parseInt(el.dataset.size);
+      });
+    });
+    
+    // Color selection
+    document.querySelectorAll('.color-btn').forEach(el => {
+      el.addEventListener('click', () => {
+        document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+        el.classList.add('active');
+        brushColor = el.dataset.color;
+      });
+    });
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        send();
+      } else if (e.key === 'Escape') {
+        cancel();
+      } else if (e.key.toLowerCase() === 'c' && !e.ctrlKey && !e.metaKey) {
+        clearCanvas();
+      } else if (e.key.toLowerCase() === 'z' && !e.ctrlKey && !e.metaKey) {
+        undo();
+      } else if (e.key === '1') {
+        document.querySelector('[data-size="2"]').click();
+      } else if (e.key === '2') {
+        document.querySelector('[data-size="4"]').click();
+      } else if (e.key === '3') {
+        document.querySelector('[data-size="8"]').click();
+      }
+    });
+    
+    // Clipboard paste - paste image and draw on top
+    document.addEventListener('paste', async (e) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          const blob = item.getAsFile();
+          if (!blob) continue;
+          
+          const img = new Image();
+          img.onload = () => {
+            // Max canvas bounds - keep it reasonable so toolbar stays visible
+            const maxWidth = 1000;
+            const maxHeight = 600;
+            
+            let newWidth = img.width;
+            let newHeight = img.height;
+            
+            // Scale down preserving aspect ratio
+            const widthRatio = maxWidth / newWidth;
+            const heightRatio = maxHeight / newHeight;
+            const scale = Math.min(widthRatio, heightRatio, 1); // Don't upscale
+            
+            newWidth = Math.round(newWidth * scale);
+            newHeight = Math.round(newHeight * scale);
+            
+            // Resize canvas
+            canvas.width = newWidth;
+            canvas.height = newHeight;
+            
+            // Draw pasted image
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            
+            saveState();
+            URL.revokeObjectURL(img.src);
+          };
+          img.src = URL.createObjectURL(blob);
+          break;
+        }
+      }
+    });
+    
+    // Track if we've already sent a result
+    let submitted = false;
+    
+    async function send() {
+      if (submitted) return;
+      submitted = true;
+      
+      // Get PNG data (strip the data:image/png;base64, prefix)
+      const dataUrl = canvas.toDataURL('image/png');
+      const base64 = dataUrl.split(',')[1];
+      
+      await fetch('/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: base64
+      });
+      
+      window.close();
+    }
+    
+    async function cancel() {
+      if (submitted) return;
+      submitted = true;
+      
+      await fetch('/cancel', { method: 'POST' });
+      window.close();
+    }
+    
+    // Resize handle functionality
+    const resizeHandle = document.getElementById('resizeHandle');
+    let resizing = false;
+    let resizeStartX, resizeStartY, startWidth, startHeight;
+    
+    resizeHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      resizing = true;
+      resizeStartX = e.clientX;
+      resizeStartY = e.clientY;
+      startWidth = canvas.width;
+      startHeight = canvas.height;
+      
+      // Save current canvas content
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      
+      const onMouseMove = (e) => {
+        if (!resizing) return;
+        
+        const dx = e.clientX - resizeStartX;
+        const dy = e.clientY - resizeStartY;
+        
+        const newWidth = Math.max(200, startWidth + dx);
+        const newHeight = Math.max(150, startHeight + dy);
+        
+        // Resize canvas
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+        
+        // Fill with white first
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Restore previous content
+        ctx.putImageData(imageData, 0, 0);
+      };
+      
+      const onMouseUp = () => {
+        if (resizing) {
+          resizing = false;
+          saveState();
+        }
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+      };
+      
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    });
+
+    // Initialize with white background
+    clearCanvas();
+    history = []; // Reset history after initial clear
+    saveState();
+    
+    // Send cancel if tab is closed without explicit action
+    window.addEventListener('beforeunload', () => {
+      navigator.sendBeacon('/cancel');
+    });
+  </script>
+</body>
+</html>

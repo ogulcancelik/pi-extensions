@@ -1,0 +1,38 @@
+{
+  "name": "@ogulcancelik/pi-handoff",
+  "version": "1.0.1",
+  "description": "Context-aware session handoff for pi. Transfer context to a new session via command, tool, or automatic context guard.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "handoff",
+    "session-transfer",
+    "context-management",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-handoff"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-handoff#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./handoff.ts"
+    ]
+  },
+  "files": [
+    "handoff.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

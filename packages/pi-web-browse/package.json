@@ -1,0 +1,63 @@
+{
+  "name": "@ogulcancelik/pi-web-browse",
+  "version": "1.0.2",
+  "description": "Web search and content extraction skill for pi-coding-agent. Search the web and fetch pages via a real headless browser (CDP). Works on Linux, macOS, and Windows.",
+  "type": "module",
+  "main": "web-browse.js",
+  "bin": {
+    "web-browse": "./web-browse.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-skill",
+    "agent-skill",
+    "web-search",
+    "web-scraping",
+    "browser-automation",
+    "cdp",
+    "headless-browser",
+    "playwright"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-web-browse"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-web-browse#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "pi": {
+    "skills": [
+      "./SKILL.md"
+    ]
+  },
+  "files": [
+    "web-browse.js",
+    "lib/",
+    "SKILL.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "cheerio": "^1.1.2",
+    "jsdom": "^27.4.0",
+    "playwright": "^1.53.2",
+    "turndown": "^7.2.2",
+    "undici": "^7.18.0"
+  }
+}

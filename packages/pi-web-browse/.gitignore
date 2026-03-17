@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# Debug dumps
+/tmp/web-browse-*
+
+# Lock files (let users generate their own)
+package-lock.json
+bun.lock
+yarn.lock
+pnpm-lock.yaml

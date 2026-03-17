@@ -1,0 +1,39 @@
+{
+  "name": "@ogulcancelik/pi-goal",
+  "version": "0.1.0",
+  "description": "Autonomous goal pursuit for pi. Break work into tasks, spawn worker agents, track progress via files on disk.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "goal",
+    "autonomous",
+    "sub-agent",
+    "task-management",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-goal"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-goal#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
