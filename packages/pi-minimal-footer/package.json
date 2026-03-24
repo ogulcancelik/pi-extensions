@@ -1,0 +1,40 @@
+{
+  "name": "@ogulcancelik/pi-minimal-footer",
+  "version": "0.1.0",
+  "description": "Minimal footer for pi with context gauge and subscription usage bars",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "footer",
+    "context",
+    "usage",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-minimal-footer"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-minimal-footer#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "assets/claude.png",
+    "assets/codex.png",
+    "README.md",
+    "LICENSE"
+  ]
+}
