@@ -36,6 +36,11 @@ interface ContextGuardState {
 
 type ContextGuardSessionManager = Pick<ExtensionCommandContext["sessionManager"], "getBranch">;
 
+interface PendingHandoff {
+	prompt: string;
+	parentSession: string | undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -81,29 +86,40 @@ function suppressContextGuard(pi: ExtensionAPI, reason: ContextGuardState["reaso
 }
 
 // ---------------------------------------------------------------------------
-// handoff tool — agent writes the prompt, starts new session
+// handoff helpers
 // ---------------------------------------------------------------------------
 
-async function agentHandoff(
+function queueHandoff(
 	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
+	ctx: Pick<ExtensionCommandContext, "hasUI" | "sessionManager">,
 	prompt: string,
-): Promise<string | undefined> {
+): PendingHandoff | string {
 	if (!ctx.hasUI) {
 		return "Handoff requires interactive mode.";
 	}
 
-	const currentSessionFile = ctx.sessionManager.getSessionFile();
-	const finalPrompt = buildFinalPrompt(prompt, currentSessionFile);
+	const pendingHandoff: PendingHandoff = {
+		prompt,
+		parentSession: ctx.sessionManager.getSessionFile(),
+	};
 
-	// Defer to next tick so the tool_result is recorded in the OLD session first
-	setTimeout(async () => {
-		const switchResult = await ctx.newSession({ parentSession: currentSessionFile });
-		if (switchResult.cancelled) return;
-		pi.sendUserMessage(finalPrompt, { deliverAs: "followUp" });
-	}, 0);
+	pi.sendUserMessage("/handoff-resume", { deliverAs: "followUp" });
+	return pendingHandoff;
+}
 
-	return undefined;
+async function resumeHandoff(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	pendingHandoff: PendingHandoff,
+): Promise<void> {
+	const finalPrompt = buildFinalPrompt(pendingHandoff.prompt, pendingHandoff.parentSession);
+	const switchResult = await ctx.newSession({ parentSession: pendingHandoff.parentSession });
+	if (switchResult.cancelled) {
+		ctx.ui.notify("New session cancelled", "info");
+		return;
+	}
+
+	pi.sendUserMessage(finalPrompt);
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +130,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Context guard state ────────────────────────────────────────────────
 	let contextGuardPrompted = false;
 	let contextGuardSuppressed = false;
+	let pendingHandoff: PendingHandoff | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
 		contextGuardPrompted = false;
@@ -203,6 +220,20 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("handoff-resume", {
+		description: "Complete a queued handoff",
+		handler: async (_args, ctx) => {
+			if (!pendingHandoff) {
+				ctx.ui.notify("No pending handoff.", "error");
+				return;
+			}
+
+			const handoff = pendingHandoff;
+			pendingHandoff = undefined;
+			await resumeHandoff(pi, ctx, handoff);
+		},
+	});
+
 	// ── handoff tool ───────────────────────────────────────────────────────
 	pi.registerTool({
 		name: "handoff",
@@ -223,10 +254,18 @@ export default function (pi: ExtensionAPI) {
 			}),
 		}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionCommandContext) {
-			const error = await agentHandoff(pi, ctx, params.prompt);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = queueHandoff(pi, ctx, params.prompt);
+			if (typeof result === "string") {
+				return {
+					content: [{ type: "text", text: result }],
+					details: {},
+				};
+			}
+
+			pendingHandoff = result;
 			return {
-				content: [{ type: "text", text: error ?? "Handoff complete. New session started." }],
+				content: [{ type: "text", text: "Handoff queued. New session will start after this turn." }],
 				details: {},
 			};
 		},
