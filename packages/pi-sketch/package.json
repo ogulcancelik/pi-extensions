@@ -27,8 +27,8 @@
     "README.md",
     "LICENSE"
   ],
-  "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.63.0"
   },
   "pi": {
     "extensions": [

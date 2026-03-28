@@ -4,5 +4,11 @@
   "description": "Pi extensions monorepo",
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.63.0",
+    "@mariozechner/pi-ai": "^0.63.0",
+    "@mariozechner/pi-tui": "^0.63.0",
+    "@sinclair/typebox": "^0.34.0"
+  }
 }
