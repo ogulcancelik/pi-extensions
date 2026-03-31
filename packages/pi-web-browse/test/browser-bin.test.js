@@ -19,11 +19,25 @@ test("resolveBrowserBin uses preferredBin when executable", () => {
 
 test("resolveBrowserBin finds binary on PATH", () => {
   const dir = mkdtempSync(join(tmpdir(), "web-browse-bin-test-"));
-  const bin = join(dir, "brave");
+  const bin = join(dir, "google-chrome");
 
   writeFileSync(bin, "#!/usr/bin/env sh\necho ok\n");
   chmodSync(bin, 0o755);
 
   const resolved = resolveBrowserBin(null, { PATH: dir });
   assert.equal(resolved, bin);
+});
+
+test("resolveBrowserBin prefers chrome over brave on PATH", () => {
+  const dir = mkdtempSync(join(tmpdir(), "web-browse-bin-test-"));
+  const chromeBin = join(dir, "google-chrome");
+  const braveBin = join(dir, "brave");
+
+  writeFileSync(chromeBin, "#!/usr/bin/env sh\necho chrome\n");
+  writeFileSync(braveBin, "#!/usr/bin/env sh\necho brave\n");
+  chmodSync(chromeBin, 0o755);
+  chmodSync(braveBin, 0o755);
+
+  const resolved = resolveBrowserBin(null, { PATH: dir });
+  assert.equal(resolved, chromeBin);
 });

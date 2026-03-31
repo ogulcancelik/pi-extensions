@@ -85,7 +85,13 @@ async function chooseAvailablePort(preferredPort) {
   return await getEphemeralPort();
 }
 
-export async function startBrowserForCdp(preferredPort, profileDir, browserBin = null, spawnedProcessGroupPids = null) {
+export async function startBrowserForCdp(
+  preferredPort,
+  profileDir,
+  browserBin = null,
+  spawnedProcessGroupPids = null,
+  extraArgs = [],
+) {
   const bin = resolveBrowserBin(browserBin);
   const port = await chooseAvailablePort(preferredPort);
 
@@ -117,6 +123,7 @@ export async function startBrowserForCdp(preferredPort, profileDir, browserBin =
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
 
+    ...extraArgs,
     `--remote-debugging-port=${port}`,
     "--remote-debugging-address=127.0.0.1",
     `--user-data-dir=${profileDir}`,

@@ -11,9 +11,8 @@ export async function checkDaemonHealth({ daemonUrl, timeoutMs = 600 } = {}) {
     const response = await fetch(`${daemonUrl}/health`, { signal: controller.signal });
     clearTimeout(timeout);
 
-    if (!response.ok) return null;
     const payload = await response.json().catch(() => null);
-    return payload && payload.status === "ok" ? payload : null;
+    return payload && typeof payload === "object" && typeof payload.status === "string" ? payload : null;
   } catch {
     return null;
   }
@@ -67,8 +66,8 @@ export async function startDaemonInBackground({
 
   child.unref();
 
-  // Wait up to ~5s for daemon to become healthy.
-  for (let i = 0; i < 20; i += 1) {
+  // Wait up to ~12s for daemon to start responding. Browser startup can be slow.
+  for (let i = 0; i < 48; i += 1) {
     await new Promise((r) => setTimeout(r, 250));
     const health = await checkDaemonHealth({ daemonUrl, timeoutMs: 800 });
     if (health) return health;
@@ -77,15 +76,30 @@ export async function startDaemonInBackground({
   throw new Error(`daemon failed to start on ${daemonUrl}`);
 }
 
+function daemonMatchesExpectedConfig(health, { expectedProfileDir = null, expectedBrowserKind = null } = {}) {
+  if (!health) return false;
+  if (expectedProfileDir && health.profileDir && health.profileDir !== expectedProfileDir) return false;
+  if (expectedBrowserKind && health.browserKind && health.browserKind !== expectedBrowserKind) return false;
+  return true;
+}
+
 export async function ensureDaemonRunning({
   scriptPath,
   daemonUrl,
   daemonPidFile,
   forwardedArgs = [],
   env = process.env,
+  expectedProfileDir = null,
+  expectedBrowserKind = null,
 } = {}) {
   const health = await checkDaemonHealth({ daemonUrl });
-  if (health) return health;
+  if (health && daemonMatchesExpectedConfig(health, { expectedProfileDir, expectedBrowserKind })) {
+    return health;
+  }
+
+  if (health) {
+    await stopDaemon({ daemonUrl, daemonPidFile }).catch(() => {});
+  }
 
   // If a stale PID file exists, ignore it; health check is the source of truth.
   return await startDaemonInBackground({ scriptPath, daemonUrl, daemonPidFile, forwardedArgs, env });
@@ -115,7 +129,7 @@ export async function stopDaemon({ daemonUrl, daemonPidFile } = {}) {
   return { status: "stopping", pid };
 }
 
-export async function sendDaemonCommand({ daemonUrl, command, payload } = {}) {
+export async function sendDaemonCommand({ daemonUrl, command, payload, timeoutMs = 180000 } = {}) {
   if (!daemonUrl) throw new Error("sendDaemonCommand requires daemonUrl");
   if (!command) throw new Error("sendDaemonCommand requires command");
 
@@ -123,7 +137,7 @@ export async function sendDaemonCommand({ daemonUrl, command, payload } = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command, payload }),
-    signal: AbortSignal.timeout(120000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   const json = await response.json().catch(() => null);

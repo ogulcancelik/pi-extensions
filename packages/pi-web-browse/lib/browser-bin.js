@@ -7,34 +7,37 @@ const IS_MACOS = PLATFORM === "darwin";
 const IS_WINDOWS = PLATFORM === "win32";
 
 // macOS .app bundle paths (checked as absolute paths)
+// Prefer Chrome first: on some setups Google Search is less likely to challenge headless Chrome than headless Brave.
 const MACOS_BROWSER_PATHS = [
-  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ];
 
 // Linux binary names (searched on PATH)
+// Prefer Chrome first: on some setups Google Search is less likely to challenge headless Chrome than headless Brave.
 const LINUX_BROWSER_NAMES = [
-  "brave",
-  "brave-browser",
   "google-chrome",
   "google-chrome-stable",
+  "brave",
+  "brave-browser",
   "chromium",
   "chromium-browser",
 ];
 
 // Windows browser paths (common install locations)
+// Prefer Chrome first: on some setups Google Search is less likely to challenge headless Chrome than headless Brave.
 const WINDOWS_BROWSER_PATHS = [
-  // Brave
-  join(process.env.LOCALAPPDATA || "", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-  join(process.env.PROGRAMFILES || "", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-  join(process.env["PROGRAMFILES(X86)"] || "", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
   // Chrome
   join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe"),
   join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe"),
   join(process.env["PROGRAMFILES(X86)"] || "", "Google", "Chrome", "Application", "chrome.exe"),
+  // Brave
+  join(process.env.LOCALAPPDATA || "", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+  join(process.env.PROGRAMFILES || "", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+  join(process.env["PROGRAMFILES(X86)"] || "", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
   // Edge (comes with Windows 10/11)
   join(process.env.PROGRAMFILES || "", "Microsoft", "Edge", "Application", "msedge.exe"),
   join(process.env["PROGRAMFILES(X86)"] || "", "Microsoft", "Edge", "Application", "msedge.exe"),

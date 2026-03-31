@@ -25,9 +25,17 @@ import { fileURLToPath } from "node:url";
 
 import { runWebBrowseDaemon } from "./lib/daemon.js";
 import { startBrowserForCdp, killBrowserProcess, resolveCdpOptions as resolveCdpOptionsModule } from "./lib/cdp.js";
+import {
+  buildBrowserFingerprint,
+  buildFingerprintHeaders,
+  applyFingerprintToContext,
+  getFingerprintLaunchArgs,
+  getDefaultCdpProfileDir,
+} from "./lib/fingerprint.js";
 import { platform } from "node:os";
 
-const IS_WINDOWS = platform() === "win32";
+const NODE_PLATFORM = platform();
+const IS_WINDOWS = NODE_PLATFORM === "win32";
 
 const CACHE_FILE = join(tmpdir(), "web-browse-cache.json");
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -45,10 +53,6 @@ const DAEMON_PID_FILE = join(tmpdir(), "web-browse-daemon.pid");
 const agent = new Agent({ connect: { family: 4 } });
 const httpFetch = (url, opts = {}) => undiciFetch(url, { ...opts, dispatcher: agent });
 
-// Use a generic Windows Chrome user agent (works well across platforms)
-const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-const USER_AGENT = process.env.WEB_BROWSE_USER_AGENT || DEFAULT_USER_AGENT;
-
 const DEBUG_DUMP_ENABLED = ["1", "true", "yes"].includes(String(process.env.WEB_BROWSE_DEBUG_DUMP || "").toLowerCase());
 const DEBUG_DUMP_BASE_DIR = process.env.WEB_BROWSE_DEBUG_DUMP_DIR || tmpdir();
 const FETCH_OPTS = {
@@ -56,13 +60,6 @@ const FETCH_OPTS = {
   debugDumpEnabled: DEBUG_DUMP_ENABLED,
   debugDumpBaseDir: DEBUG_DUMP_BASE_DIR,
 };
-
-const HEADERS = {
-  "User-Agent": USER_AGENT,
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": process.env.WEB_BROWSE_ACCEPT_LANGUAGE || "en-US,en;q=0.9",
-};
-
 
 const spawnedBraveProcessGroupPids = new Set();
 
@@ -139,8 +136,10 @@ const fullContent = hasFlag("--full");
 const cdpStart = hasFlag("--cdp-start");
 const useCdp = hasFlag("--cdp") || cdpStart;
 const cdpPort = parseInt(getArg("--cdp-port") || (cdpStart ? "9225" : "9222"), 10);
-const cdpProfile = getArg("--cdp-profile") || join(homedir(), ".config", "web-browse-cdp-profile");
 const browserBinArg = getArg("--browser-bin");
+const BROWSER_FINGERPRINT = buildBrowserFingerprint({ preferredBin: browserBinArg, env: process.env });
+const cdpProfile = getArg("--cdp-profile") || getDefaultCdpProfileDir(BROWSER_FINGERPRINT, homedir());
+const HEADERS = buildFingerprintHeaders(BROWSER_FINGERPRINT);
 const stressCount = parseInt(getArg("--stress") || "0", 10);
 const daemonCommand = getArg("--daemon"); // start|stop|status|restart
 const daemonRun = hasFlag("--daemon-run");
@@ -183,8 +182,14 @@ Notes:
 }
 
 // --- Cache ---
-function saveCache(query, results) {
-  const cache = { query, timestamp: Date.now(), results };
+function saveCache(query, searchResponse) {
+  const normalized = normalizeSearchResponse(searchResponse);
+  const cache = {
+    query,
+    timestamp: Date.now(),
+    results: normalized.results,
+    source: normalized.source,
+  };
   writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
 }
 
@@ -229,6 +234,8 @@ async function daemonEnsureRunning() {
     daemonPidFile: DAEMON_PID_FILE,
     forwardedArgs: getDaemonForwardedArgs(),
     env: process.env,
+    expectedProfileDir: cdpProfile,
+    expectedBrowserKind: BROWSER_FINGERPRINT.browserKind,
   });
 }
 
@@ -236,12 +243,77 @@ async function daemonStop() {
   return await stopDaemon({ daemonUrl: DAEMON_URL, daemonPidFile: DAEMON_PID_FILE });
 }
 
-async function daemonSendCommand(command, payload) {
-  return await sendDaemonCommand({ daemonUrl: DAEMON_URL, command, payload });
+function getDaemonCommandTimeoutMs(command, payload = {}) {
+  const envOverride = parseInt(process.env.WEB_BROWSE_DAEMON_COMMAND_TIMEOUT_MS || "", 10);
+  if (Number.isFinite(envOverride) && envOverride > 0) return envOverride;
+
+  if (command === "search") return 120000;
+  if (command === "fetch") return fullContent ? 240000 : 180000;
+  if (command === "fetchMany") {
+    const urlCount = Array.isArray(payload.urls) ? payload.urls.length : 1;
+    return Math.min(10 * 60 * 1000, 60000 + urlCount * (fullContent ? 120000 : 90000));
+  }
+
+  return 180000;
+}
+
+function isRetryableDaemonError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  const markers = [
+    "timeout",
+    "fetch failed",
+    "connect",
+    "socket",
+    "econnreset",
+    "hang up",
+    "aborted",
+    "invalid daemon response",
+    "browser has been closed",
+    "target page, context or browser has been closed",
+    "connection closed",
+    "channel closed",
+    "terminated",
+  ];
+
+  return markers.some((marker) => message.includes(marker));
+}
+
+async function daemonSendCommand(command, payload, { timeoutMs = getDaemonCommandTimeoutMs(command, payload) } = {}) {
+  return await sendDaemonCommand({ daemonUrl: DAEMON_URL, command, payload, timeoutMs });
+}
+
+async function daemonSendCommandWithRecovery(command, payload, options = {}) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await daemonEnsureRunning();
+
+    try {
+      return await daemonSendCommand(command, payload, options);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (attempt >= 2 || !isRetryableDaemonError(error)) {
+        throw error;
+      }
+
+      console.error(`Daemon command ${command} failed (${message}). Restarting daemon and retrying once...`);
+      await daemonStop().catch(() => {});
+    }
+  }
+
+  throw lastError;
 }
 
 async function startBraveForCdp(preferredPort, profileDir, browserBin = null) {
-  const launched = await startBrowserForCdp(preferredPort, profileDir, browserBin, spawnedBraveProcessGroupPids);
+  const launched = await startBrowserForCdp(
+    preferredPort,
+    profileDir,
+    browserBin,
+    spawnedBraveProcessGroupPids,
+    getFingerprintLaunchArgs(BROWSER_FINGERPRINT),
+  );
   return { proc: launched.proc, port: launched.port };
 }
 
@@ -286,21 +358,17 @@ async function searchWebOneShot(
         ownedContext = true;
       }
 
-      // Inject stealth scripts for CDP mode (avoid bot detection)
-      await context.addInitScript(() => {
-        if (!window.chrome) window.chrome = {};
-        if (!window.chrome.runtime) window.chrome.runtime = { id: undefined };
-      });
+      await applyFingerprintToContext(context, BROWSER_FINGERPRINT);
     } else {
       context = await chromium.launchPersistentContext(profileDir, {
         headless: true,
-        viewport: { width: 1280, height: 720 },
-        locale: "en-US",
-        timezoneId: "UTC",
-        userAgent: HEADERS["User-Agent"],
-        colorScheme: "light",
+        viewport: BROWSER_FINGERPRINT.viewport,
+        locale: BROWSER_FINGERPRINT.locale,
+        timezoneId: BROWSER_FINGERPRINT.timezoneId,
+        userAgent: BROWSER_FINGERPRINT.userAgent,
+        colorScheme: BROWSER_FINGERPRINT.colorScheme,
         extraHTTPHeaders: {
-          "Accept-Language": "en-US,en;q=0.9",
+          "Accept-Language": BROWSER_FINGERPRINT.acceptLanguage,
           "Upgrade-Insecure-Requests": "1",
         },
         args: [
@@ -313,18 +381,10 @@ async function searchWebOneShot(
       });
       ownedContext = true;
 
-      await context.addInitScript(() => {
-        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-        Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-        Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, "platform", { get: () => "Linux x86_64" });
-        Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 });
-        Object.defineProperty(navigator, "deviceMemory", { get: () => 8 });
-        window.chrome = { runtime: {} };
-      });
+      await applyFingerprintToContext(context, BROWSER_FINGERPRINT);
     }
 
-    const results = await searchWebFromContext({
+    const searchResponse = await searchWebFromContext({
       context,
       httpFetch,
       headers: HEADERS,
@@ -333,7 +393,10 @@ async function searchWebOneShot(
       log: (msg) => console.error(msg),
     });
 
-    return results.slice(0, clampedNum);
+    return {
+      ...searchResponse,
+      results: searchResponse.results.slice(0, clampedNum),
+    };
   } finally {
     if (context && cdpAutoStart) {
       const pages = context.pages();
@@ -389,12 +452,7 @@ async function withCdpBrowser(cdpOptions, cdpProfileValue, handler) {
 
       browser = await chromium.connectOverCDP(`http://127.0.0.1:${effectiveCdpPort}`);
       context = browser.contexts()[0] ?? await browser.newContext();
-
-      // Inject stealth scripts for CDP mode (avoid bot detection)
-      await context.addInitScript(() => {
-        if (!window.chrome) window.chrome = {};
-        if (!window.chrome.runtime) window.chrome.runtime = { id: undefined };
-      });
+      await applyFingerprintToContext(context, BROWSER_FINGERPRINT);
     } else {
       throw new Error("CDP is required for this fetch");
     }
@@ -467,11 +525,29 @@ async function runDaemon() {
     cleanupContextPages,
     fetchOpts: FETCH_OPTS,
     spawnedBrowserProcessGroupPids: spawnedBraveProcessGroupPids,
+    browserFingerprint: BROWSER_FINGERPRINT,
   });
 }
 
 // --- Output Formatting ---
-function printSearchResults(results) {
+function normalizeSearchResponse(searchResponse) {
+  if (Array.isArray(searchResponse)) {
+    return { results: searchResponse, source: null };
+  }
+
+  if (searchResponse && typeof searchResponse === "object") {
+    return {
+      results: Array.isArray(searchResponse.results) ? searchResponse.results : [],
+      source: typeof searchResponse.source === "string" ? searchResponse.source : null,
+    };
+  }
+
+  return { results: [], source: null };
+}
+
+function printSearchResults(searchResponse) {
+  const { results, source } = normalizeSearchResponse(searchResponse);
+
   console.log("=".repeat(70) + "\n");
   results.forEach((result, i) => {
     console.log(`## ${i + 1}. ${result.title}`);
@@ -480,6 +556,9 @@ function printSearchResults(results) {
     console.log("=".repeat(70) + "\n");
   });
   console.log(`💡 Use --fetch 1,2,3 to fetch specific results`);
+  if (source) {
+    console.log(`🔎 Source: ${source}`);
+  }
 }
 
 function printFetchedContent(results) {
@@ -544,8 +623,7 @@ async function main() {
     let result;
 
     if (!noDaemon) {
-      await daemonEnsureRunning();
-      result = await daemonSendCommand("fetch", { url: directUrl, truncate: !fullContent });
+      result = await daemonSendCommandWithRecovery("fetch", { url: directUrl, truncate: !fullContent });
     } else {
       const cdpOptions = await resolveCdpOptions(useCdp, cdpStart, cdpPort);
       result = cdpOptions.useCdp
@@ -580,8 +658,10 @@ async function main() {
     let results;
 
     if (!noDaemon) {
-      await daemonEnsureRunning();
-      results = await daemonSendCommand("fetchMany", { urls: toFetch.map((item) => item.link), truncate: !fullContent });
+      results = await daemonSendCommandWithRecovery("fetchMany", {
+        urls: toFetch.map((item) => item.link),
+        truncate: !fullContent,
+      });
     } else {
       const cdpOptions = await resolveCdpOptions(useCdp, cdpStart, cdpPort);
       results = cdpOptions.useCdp
@@ -597,8 +677,7 @@ async function main() {
   if (query) {
     const attemptSearch = async () => {
       if (!noDaemon) {
-        await daemonEnsureRunning();
-        return await daemonSendCommand("search", { query, numResults });
+        return await daemonSendCommandWithRecovery("search", { query, numResults });
       }
 
       const cdpOptions = await resolveCdpOptions(useCdp, cdpStart, cdpPort);
@@ -618,8 +697,8 @@ async function main() {
 
       for (let i = 0; i < stressCount; i += 1) {
         console.error(`Run ${i + 1}/${stressCount}`);
-        const results = await attemptSearch();
-        if (results.length > 0) {
+        const searchResponse = await attemptSearch();
+        if (normalizeSearchResponse(searchResponse).results.length > 0) {
           successCount += 1;
         }
       }
@@ -629,15 +708,16 @@ async function main() {
     }
 
     console.error(`Searching: "${query}"\n`);
-    const results = await attemptSearch();
+    const searchResponse = await attemptSearch();
+    const { results } = normalizeSearchResponse(searchResponse);
 
     if (results.length === 0) {
       console.log("No results found.");
       process.exit(0);
     }
 
-    saveCache(query, results);
-    printSearchResults(results);
+    saveCache(query, searchResponse);
+    printSearchResults(searchResponse);
     return;
   }
 
