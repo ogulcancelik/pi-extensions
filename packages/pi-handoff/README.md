@@ -1,70 +1,41 @@
-> **Status**: Currently broken on the latest pi release (v0.61.1). The extension requires a fix upstream — tool `execute` handlers only get `ExtensionContext` without `newSession`. The maintainer is working on a `runWhenIdle` API to address this.
-
 # pi-handoff
 
-Context-aware session handoff for [pi](https://github.com/badlogic/pi-mono). Transfer context to a new session via command, tool, or automatic context guard.
+Discontinued.
 
-## Install
+I am not using this extension anymore.
 
-```bash
-pi install npm:@ogulcancelik/pi-handoff
-```
+## Why
 
-Or add manually to `~/.pi/agent/settings.json`:
+The original goal of `pi-handoff` was agent-driven session handoff: let the current agent prepare the handoff and start the next session directly.
 
-```json
-{
-  "packages": ["npm:@ogulcancelik/pi-handoff"]
-}
-```
+That depends on an API shape upstream pi still does not expose cleanly: extension tools cannot start a new session themselves in the same way command handlers can.
 
-## What it does
+Without that, the extension ends up needing awkward workarounds:
 
-Three ways to hand off context to a fresh session:
+- hidden in-band prompts to make the current agent draft a handoff
+- scraping assistant replies back out of the session
+- brittle timing around when a new session should start
 
-### `/handoff <instruction>`
+That is not robust enough to keep using.
 
-User-initiated. Tell the agent what to focus on — it writes a complete handoff prompt and starts a new session.
+## What I use instead
 
-```
-/handoff continue with phase two of the refactor plan
-/handoff focus on the combat sim changes, especially the Unity port
-```
+I now use the upstream handoff example directly:
 
-### `handoff` tool
+- https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/examples/extensions/handoff.ts
 
-Agent-initiated. The agent writes the handoff prompt directly when asked. The prompt includes all relevant context, decisions, files, and next steps so the new session can continue without the old conversation.
+That approach is simpler and more reliable:
 
-### Context guard (automatic)
+1. read the current branch messages
+2. make a separate summarization call to generate the handoff prompt
+3. let the user review/edit it
+4. start the new session
 
-At **90% context usage**, you get a prompt:
+It gives up the old "agent starts the next session itself" idea, but it works cleanly on upstream pi.
 
-```
-Context at 92% — handoff to a new session?
-> Yes, handoff
-  No, keep going
-```
+## Status
 
-If you pick yes — or don't respond within 60 seconds — the agent automatically writes a handoff prompt and starts a new session. If you pick no or dismiss the prompt, it keeps going in the current session and won't ask again for that session.
-
-## How it works
-
-1. The agent writes a self-contained prompt summarizing the current session
-2. A new session is created (with parent session tracking)
-3. The handoff prompt is delivered to the new session as the first message
-4. The prompt includes a reference to the parent session file
-
-## Pairs well with pi-session-recall
-
-The handoff prompt includes a parent session reference. If you also have [pi-session-recall](https://github.com/ogulcancelik/pi-session-recall) installed, the new session can query the parent for additional context using `session_query` — useful when the agent needs details that didn't make it into the handoff prompt.
-
-```bash
-pi install npm:@ogulcancelik/pi-session-recall
-```
-
-## Requirements
-
-- [pi](https://github.com/badlogic/pi-mono) v0.40+
+This package is kept here as a discontinued experiment / reference, not an actively used extension.
 
 ## License
 
