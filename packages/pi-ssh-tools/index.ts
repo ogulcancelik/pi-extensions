@@ -228,7 +228,7 @@ function createRemoteBashOps(target: ActiveSshTarget): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout }) => {
 			const script = `cd ${shellQuote(cwd)}\n${command}\n`;
-			const { exitCode } = await sshExec(target.remote, "bash -se", {
+			const { exitCode } = await sshExec(target.remote, `exec "\${SHELL:-/bin/sh}" -lc 'exec bash -se'`, {
 				stdin: script,
 				signal,
 				timeoutSeconds: timeout,
