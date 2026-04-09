@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-tmux",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tmux pane management for pi. Run dev servers, watchers, and long-running processes in named panes without blocking the agent.",
   "type": "module",
   "keywords": [
