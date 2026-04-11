@@ -15,7 +15,8 @@ interface WorkspaceInfo {
 	pane_count: number;
 	tab_count: number;
 	active_tab_id: string;
-	agent_status: AgentStatus;
+	agent_status?: AgentStatus;
+	agent_state?: AgentStatus;
 }
 
 interface TabInfo {
@@ -25,7 +26,8 @@ interface TabInfo {
 	label: string;
 	focused: boolean;
 	pane_count: number;
-	agent_status: AgentStatus;
+	agent_status?: AgentStatus;
+	agent_state?: AgentStatus;
 }
 
 interface PaneInfo {
@@ -35,7 +37,8 @@ interface PaneInfo {
 	focused: boolean;
 	cwd?: string;
 	agent?: string;
-	agent_status: AgentStatus;
+	agent_status?: AgentStatus;
+	agent_state?: AgentStatus;
 	revision: number;
 }
 
@@ -362,10 +365,11 @@ export default function (pi: ExtensionAPI) {
 
 	function summarizePane(pane: PaneInfo, alias?: string, currentPaneId?: string): string {
 		const name = alias || pane.pane_id;
+		const agentStatus = getAgentStatus(pane);
 		const flags = [
 			pane.pane_id === currentPaneId || pane.focused ? "current" : null,
 			pane.agent ? pane.agent : null,
-			pane.agent_status !== "unknown" ? pane.agent_status : null,
+			agentStatus !== "unknown" ? agentStatus : null,
 		]
 			.filter(Boolean)
 			.join(", ");
@@ -374,14 +378,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function summarizeTab(tab: TabInfo): string {
-		const flags = [tab.focused ? "focused" : null, tab.agent_status !== "unknown" ? tab.agent_status : null]
+		const agentStatus = getAgentStatus(tab);
+		const flags = [tab.focused ? "focused" : null, agentStatus !== "unknown" ? agentStatus : null]
 			.filter(Boolean)
 			.join(", ");
 		return `${tab.label}: [${tab.tab_id}]${flags ? ` (${flags})` : ""}`;
 	}
 
 	function summarizeWorkspace(workspace: WorkspaceInfo): string {
-		const flags = [workspace.focused ? "focused" : null, workspace.agent_status !== "unknown" ? workspace.agent_status : null]
+		const agentStatus = getAgentStatus(workspace);
+		const flags = [workspace.focused ? "focused" : null, agentStatus !== "unknown" ? agentStatus : null]
 			.filter(Boolean)
 			.join(", ");
 		return `${workspace.label}: [${workspace.workspace_id}]${flags ? ` (${flags})` : ""}`;
@@ -401,6 +407,10 @@ export default function (pi: ExtensionAPI) {
 
 	function formatStatusList(statuses: AgentStatus[]): string {
 		return statuses.join("|");
+	}
+
+	function getAgentStatus(item: { agent_status?: AgentStatus; agent_state?: AgentStatus }): AgentStatus {
+		return item.agent_state ?? item.agent_status ?? "unknown";
 	}
 
 	function throwIfAborted(signal: AbortSignal | undefined, action: string) {
@@ -797,7 +807,7 @@ export default function (pi: ExtensionAPI) {
 							snapshot.push({
 								pane: resolved.aliasOrRef,
 								paneId: pane.pane_id,
-								status: pane.agent_status,
+								status: getAgentStatus(pane),
 								agent: pane.agent,
 							});
 						}
@@ -972,9 +982,10 @@ export default function (pi: ExtensionAPI) {
 					const workspaces = details.workspaces as WorkspaceInfo[];
 					if (!workspaces?.length) return new Text(theme.fg("dim", "no workspaces"), 0, 0);
 					const lines = workspaces.map((workspace) => {
-						const dot = statusDot(theme, workspace.agent_status);
+						const workspaceStatus = getAgentStatus(workspace);
+						const dot = statusDot(theme, workspaceStatus);
 						const label = theme.fg(workspace.focused ? "accent" : "muted", workspace.label || workspace.workspace_id);
-						const extra = [workspace.workspace_id, workspace.agent_status !== "unknown" ? workspace.agent_status : null]
+						const extra = [workspace.workspace_id, workspaceStatus !== "unknown" ? workspaceStatus : null]
 							.filter(Boolean)
 							.join(" ");
 						return `${dot} ${label}${extra ? ` ${theme.fg("dim", extra)}` : ""}`;
@@ -985,9 +996,10 @@ export default function (pi: ExtensionAPI) {
 					const tabs = details.tabs as TabInfo[];
 					if (!tabs?.length) return new Text(theme.fg("dim", "no tabs"), 0, 0);
 					const lines = tabs.map((tab) => {
-						const dot = statusDot(theme, tab.agent_status);
+						const tabStatus = getAgentStatus(tab);
+						const dot = statusDot(theme, tabStatus);
 						const label = theme.fg(tab.focused ? "accent" : "muted", tab.label || tab.tab_id);
-						const extra = [tab.tab_id, tab.agent_status !== "unknown" ? tab.agent_status : null].filter(Boolean).join(" ");
+						const extra = [tab.tab_id, tabStatus !== "unknown" ? tabStatus : null].filter(Boolean).join(" ");
 						return `${dot} ${label}${extra ? ` ${theme.fg("dim", extra)}` : ""}`;
 					});
 					return new Text(lines.join("\n"), 0, 0);
@@ -997,11 +1009,12 @@ export default function (pi: ExtensionAPI) {
 					if (!panes?.length) return new Text(theme.fg("dim", "no panes"), 0, 0);
 					const paneAliases = (details.paneAliases || {}) as Record<string, string>;
 					const lines = panes.map((pane) => {
-						const dot = statusDot(theme, pane.agent_status);
+						const paneStatus = getAgentStatus(pane);
+						const dot = statusDot(theme, paneStatus);
 						const label = paneAliases[pane.pane_id]
 							? theme.fg("accent", paneAliases[pane.pane_id])
 							: theme.fg("muted", pane.pane_id);
-						const extra = [pane.agent, pane.agent_status !== "unknown" ? pane.agent_status : null].filter(Boolean).join(" ");
+						const extra = [pane.agent, paneStatus !== "unknown" ? paneStatus : null].filter(Boolean).join(" ");
 						return `${dot} ${label}${extra ? ` ${theme.fg("dim", extra)}` : ""}`;
 					});
 					return new Text(lines.join("\n"), 0, 0);
