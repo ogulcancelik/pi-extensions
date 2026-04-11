@@ -1,6 +1,6 @@
 # pi-herdr
 
-Herdr-native pane, tab, and workspace orchestration for [pi](https://github.com/badlogic/pi-mono). Run commands in existing or new panes, read output, wait for readiness, coordinate with other agents, and organize work across tabs and workspaces without falling back to tmux choreography.
+Herdr-native pane, tab, and workspace orchestration for [pi](https://github.com/badlogic/pi-mono). Run commands in existing panes, read output, wait for readiness, coordinate with other agents, and organize work across tabs and workspaces without falling back to tmux choreography.
 
 ## Install
 
@@ -30,7 +30,7 @@ Gives the agent a `herdr` tool with these actions:
 | **tab_create** | Create a tab |
 | **tab_focus** | Focus a tab |
 | **focus** | Focus a workspace, tab, or the tab containing a pane |
-| **run** | Submit a line atomically with Enter in an existing pane, or create a new managed pane and submit it there |
+| **run** | Submit a line atomically with Enter in an existing pane |
 | **read** | Read output from a pane |
 | **watch** | Wait until pane output matches text or regex |
 | **wait_agent** | Wait until one or more agent panes reach one or more target statuses |
@@ -57,12 +57,10 @@ That means the agent can do higher-level pane workflows with fewer brittle steps
 - The extension returns early unless `HERDR_ENV` exists and `HERDR_PANE_ID` is present, so the `herdr` tool is not registered at all outside herdr
 - Pane actions target pane identity. Use friendly aliases like `server` or `tests`, or real herdr pane ids from create/list results
 - Alias state is stored in tool result details and reconstructed on session load and branch changes
-- The extension preserves current focus by default. Creation and run flows stay in the current UI context unless `focus: true` is passed explicitly.
+- The extension preserves current focus by default. Creation flows stay in the current UI context unless `focus: true` is passed explicitly.
 - `workspace_create` and `tab_create` use herdr's returned `root_pane` when available, with a pane-list fallback for older herdr versions
-- `run` uses an existing pane when the alias or pane id already exists
-- `run` creates a new managed pane only when the alias does not exist yet
-- First new worker pane splits to the right of the current pane
-- Additional new worker panes stack downward below the most recently created managed pane
+- `run` only targets an existing pane alias or real pane id
+- If an alias no longer points to a live pane, the extension removes it and returns an error
 - `watch` uses `herdr wait output`
 - `wait_agent` uses herdr agent status information and can coordinate one pane or many panes
 - `watch` and `wait_agent` forward pi's abort signal, so Escape cancels the wait
@@ -86,7 +84,11 @@ Important workflow tips:
 
 ## Starting another pi cleanly
 
-A good pattern for a fresh agent in another pane is:
+A good pattern for a fresh agent in another pane is to create a tab or workspace root pane, alias it, then run in that existing pane:
+
+```json
+{ "action": "tab_create", "label": "review", "pane": "reviewer" }
+```
 
 ```json
 { "action": "run", "pane": "reviewer", "command": "pi --no-session --model openai-codex/gpt-5.4-mini" }
@@ -96,7 +98,13 @@ If model choice matters and the user has not specified one, the agent should ask
 
 ## Example workflows
 
-Run a server in a new managed pane:
+Create a tab and remember its root pane as `server`:
+
+```json
+{ "action": "tab_create", "label": "server", "pane": "server" }
+```
+
+Run a server in that existing pane:
 
 ```json
 { "action": "run", "pane": "server", "command": "bun run dev" }
@@ -160,10 +168,10 @@ List workspaces and tabs:
 - `wait_agent` accepts either `pane`/`status` for single-pane waits or `panes`/`statuses` for multi-pane waits. Use `mode: "all"` or `mode: "any"` to control how multi-pane waits resolve.
 - `run` is the default way to submit a line or prompt to a pane because it sends text and Enter atomically.
 - `send` is low-level input only. It does not press Enter. If you want text plus Enter as one action, use `run` instead of `send` + `Enter`.
-- `run` targets an existing pane when the alias or pane id already exists.
-- `run` creates a new sibling pane when the alias does not exist yet. It preserves current focus unless `focus: true` is passed explicitly.
+- `run` only targets an existing pane. It never creates or restarts panes.
+- If an alias is stale, the extension removes it and returns an error.
 - `tab_create` and `workspace_create` accept `label` and preserve current focus unless `focus: true` is passed explicitly.
-- If you already know a real pane id from `list` or another herdr response, you can use it directly in `read`, `watch`, `wait_agent`, `send`, `stop`, or `focus`, even outside the alias map.
+- If you already know a real pane id from `list` or another herdr response, you can use it directly in `run`, `read`, `watch`, `wait_agent`, `send`, `stop`, or `focus`, even outside the alias map.
 - Herdr does not currently expose direct pane focus. `focus` with a pane id focuses the pane's tab.
 
 ## Requirements

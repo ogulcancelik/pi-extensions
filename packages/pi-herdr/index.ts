@@ -98,10 +98,6 @@ const SourceEnum = StringEnum(["visible", "recent", "recent-unwrapped"] as const
 	description: "Read source for read/watch",
 });
 
-const DirectionEnum = StringEnum(["right", "down"] as const, {
-	description: "Split direction for run",
-});
-
 const WaitModeEnum = StringEnum(["all", "any"] as const, {
 	description: "How multi-pane waits should resolve",
 });
@@ -325,18 +321,18 @@ export default function (pi: ExtensionAPI) {
 		return { pane, alias };
 	}
 
-	async function findSplitTarget(
-		currentPaneId: string,
+	async function requirePaneRef(
+		ref: string,
 		workspaceId: string,
 		signal?: AbortSignal,
-	): Promise<{ target: string; direction: "right" | "down" }> {
-		for (const alias of [...aliasOrder].reverse()) {
-			const managed = await resolveManagedPane(alias, workspaceId, signal);
-			if (managed) {
-				return { target: managed.paneId, direction: "down" };
-			}
+	): Promise<{ pane: PaneInfo; alias?: string }> {
+		const hadAlias = managedPanes.has(ref);
+		const resolved = await resolvePaneRef(ref, workspaceId, signal);
+		if (resolved) return resolved;
+		if (hadAlias) {
+			throw new Error(`Pane alias '${ref}' no longer points to a live pane and was removed.`);
 		}
-		return { target: currentPaneId, direction: "right" };
+		throw new Error(`Pane '${ref}' not found in the current workspace.`);
 	}
 
 	async function readPane(
@@ -450,7 +446,7 @@ export default function (pi: ExtensionAPI) {
 		label: "herdr",
 		description:
 			"Herdr-native pane orchestration for long-running workflows. " +
-			"Actions: list panes, manage workspaces and tabs, submit lines atomically in existing or new panes, read output, watch readiness, wait for one or more agent panes to reach target statuses, send raw text or keys, focus contexts, and stop panes.",
+			"Actions: list panes, manage workspaces and tabs, submit lines atomically in existing panes, read output, watch readiness, wait for one or more agent panes to reach target statuses, send raw text or keys, focus contexts, and stop panes.",
 		promptGuidelines: [
 			"Use `herdr` run for long-running processes in other panes instead of `bash`.",
 			"When you want to submit a line or prompt to a pane, prefer `run` over `send` + `Enter` so text and Enter happen atomically.",
@@ -462,6 +458,7 @@ export default function (pi: ExtensionAPI) {
 			"Use `herdr` wait_agent with agent statuses. It can wait on one pane or a set of panes, and background finished panes usually become `done` while focused finished panes usually become `idle`.",
 			"Use `recent-unwrapped` when you need log matching or reads that ignore soft wrapping.",
 			"Pane references can be either friendly aliases you created earlier or real herdr pane ids from `list`.",
+			"Use `tab_create` or `workspace_create` to establish new pane targets. `run` only works with an existing pane alias or pane id.",
 			"Use friendly pane aliases like `server`, `reviewer`, or `tests` so later reads, watches, and sends can reuse them across the session.",
 			"When starting a fresh pi instance in another pane and the model matters, either specify `--model` explicitly or ask the user which model/provider they want.",
 		],
@@ -488,11 +485,7 @@ export default function (pi: ExtensionAPI) {
 					description: "Keys to send, space-separated (for send action). Examples: C-c, Enter, q, y",
 				}),
 			),
-			restart: Type.Optional(
-				Type.Boolean({ description: "Close and recreate the alias pane before running (for run action)" }),
-			),
-			cwd: Type.Optional(Type.String({ description: "Working directory for the new pane or workspace/tab (where supported)" })),
-			direction: Type.Optional(DirectionEnum),
+			cwd: Type.Optional(Type.String({ description: "Working directory for workspace/tab create where supported" })),
 			focus: Type.Optional(Type.Boolean({ description: "Explicitly change focus for create/focus actions. Defaults should preserve current focus." })),
 		}),
 
@@ -648,8 +641,7 @@ export default function (pi: ExtensionAPI) {
 						};
 					}
 					if (params.pane) {
-						const resolved = await resolvePaneRef(params.pane, currentWorkspaceId, signal);
-						if (!resolved) throw new Error(`Pane '${params.pane}' not found in the current workspace.`);
+						const resolved = await requirePaneRef(params.pane, currentWorkspaceId, signal);
 						const response = await execHerdrJson<{ result: { tab: TabInfo } }>(["tab", "focus", resolved.pane.tab_id], signal);
 						return {
 							content: [{
@@ -669,34 +661,7 @@ export default function (pi: ExtensionAPI) {
 					if (!paneRef) throw new Error("'pane' is required for run");
 					if (!command) throw new Error("'command' is required for run");
 
-					let targetPane = await resolvePaneRef(paneRef, currentWorkspaceId, signal);
-					let created = false;
-					let splitDirection: "right" | "down" | undefined;
-
-					if (targetPane && params.restart) {
-						if (targetPane.pane.pane_id === currentPaneId) {
-							throw new Error("Refusing to restart the pane pi is running in.");
-						}
-						await execHerdr(["pane", "close", targetPane.pane.pane_id], signal);
-						if (targetPane.alias) forgetAlias(targetPane.alias);
-						targetPane = null;
-					}
-
-					if (!targetPane) {
-						const autoTarget = await findSplitTarget(currentPaneId, currentWorkspaceId, signal);
-						const splitTarget = params.direction ? currentPaneId : autoTarget.target;
-						splitDirection = params.direction || autoTarget.direction;
-						const splitArgs = ["pane", "split", splitTarget, "--direction", splitDirection];
-						if (params.focus !== true) splitArgs.push("--no-focus");
-						if (params.cwd) splitArgs.push("--cwd", params.cwd);
-
-						const split = await execHerdrJson<{ result: { pane: PaneInfo } }>(splitArgs, signal);
-						const newPane = split.result.pane;
-						recordAlias(paneRef, newPane.pane_id, currentWorkspaceId);
-						targetPane = { pane: newPane, alias: paneRef };
-						created = true;
-					}
-
+					const targetPane = await requirePaneRef(paneRef, currentWorkspaceId, signal);
 					await execHerdr(["pane", "run", targetPane.pane.pane_id, command], signal);
 
 					await sleep(800, signal);
@@ -723,8 +688,6 @@ export default function (pi: ExtensionAPI) {
 							pane: paneLabel,
 							paneId: targetPane.pane.pane_id,
 							command,
-							created,
-							direction: splitDirection,
 							workspaceId: currentWorkspaceId,
 						}),
 					};
@@ -735,8 +698,7 @@ export default function (pi: ExtensionAPI) {
 					const paneRef = params.pane;
 					if (!paneRef) throw new Error("'pane' is required for read");
 
-					const resolved = await resolvePaneRef(paneRef, currentWorkspaceId, signal);
-					if (!resolved) throw new Error(`Pane '${paneRef}' not found in the current workspace.`);
+					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
 
 					const output = await readPane(
 						resolved.pane.pane_id,
@@ -766,8 +728,7 @@ export default function (pi: ExtensionAPI) {
 					if (!paneRef) throw new Error("'pane' is required for watch");
 					if (!match) throw new Error("'match' is required for watch");
 
-					const resolved = await resolvePaneRef(paneRef, currentWorkspaceId, signal);
-					if (!resolved) throw new Error(`Pane '${paneRef}' not found in the current workspace.`);
+					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
 
 					const args = ["wait", "output", resolved.pane.pane_id, "--match", match];
 					if (params.source) args.push("--source", params.source);
@@ -811,8 +772,7 @@ export default function (pi: ExtensionAPI) {
 					const resolvedPanes: Array<{ pane: PaneInfo; aliasOrRef: string }> = [];
 					for (const paneRef of paneRefs) {
 						throwIfAborted(signal, "wait_agent");
-						const resolved = await resolvePaneRef(paneRef, currentWorkspaceId, signal);
-						if (!resolved) throw new Error(`Pane '${paneRef}' not found in the current workspace.`);
+						const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
 						resolvedPanes.push({
 							pane: resolved.pane,
 							aliasOrRef: resolved.alias || paneRef,
@@ -881,8 +841,7 @@ export default function (pi: ExtensionAPI) {
 					if (!paneRef) throw new Error("'pane' is required for send");
 					if (!params.text && !params.keys) throw new Error("'text' or 'keys' is required for send");
 
-					const resolved = await resolvePaneRef(paneRef, currentWorkspaceId, signal);
-					if (!resolved) throw new Error(`Pane '${paneRef}' not found in the current workspace.`);
+					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
 
 					if (params.text) {
 						await execHerdr(["pane", "send-text", resolved.pane.pane_id, params.text], signal);
@@ -910,8 +869,7 @@ export default function (pi: ExtensionAPI) {
 					const paneRef = params.pane;
 					if (!paneRef) throw new Error("'pane' is required for stop");
 
-					const resolved = await resolvePaneRef(paneRef, currentWorkspaceId, signal);
-					if (!resolved) throw new Error(`Pane '${paneRef}' not found in the current workspace.`);
+					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
 					if (resolved.pane.pane_id === currentPaneId) {
 						throw new Error("Refusing to close the pane pi is running in.");
 					}
