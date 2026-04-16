@@ -19,8 +19,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir } from "@mariozechner/pi-coding-agent";
 
 interface GhosttyColors {
 	background: string;
@@ -288,7 +287,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const themesDir = join(homedir(), ".pi", "agent", "themes");
+		const themesDir = join(getAgentDir(), "themes");
 		if (!existsSync(themesDir)) {
 			mkdirSync(themesDir, { recursive: true });
 		}
