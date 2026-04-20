@@ -496,7 +496,7 @@ export default function (pi: ExtensionAPI) {
 			focus: Type.Optional(Type.Boolean({ description: "Explicitly change focus for create/focus actions. Defaults should preserve current focus." })),
 		}),
 
-		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
 			const currentPane = await getCurrentPaneInfo(signal);
 			const currentPaneId = currentPane.pane_id;
 			const currentWorkspaceId = currentPane.workspace_id;
@@ -773,35 +773,58 @@ export default function (pi: ExtensionAPI) {
 					if (!match) throw new Error("'match' is required for watch");
 
 					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+					const paneLabel = resolved.alias || paneRef;
+					const startTime = Date.now();
 
-					const args = ["wait", "output", resolved.pane.pane_id, "--match", match];
-					if (params.source) args.push("--source", params.source);
-					if (params.lines != null) args.push("--lines", String(params.lines));
-					if (params.timeout != null) args.push("--timeout", String(params.timeout));
-					if (params.regex) args.push("--regex");
-					if (params.raw) args.push("--raw");
-
-					const response = await execHerdrJson<{
-						result: {
-							type: string;
-							pane_id: string;
-							revision: number;
-							matched_line: string;
-							read: PaneReadResult;
-						};
-					}>(args, signal);
-					const matched = response.result;
-					const text = matched.read?.text ? formatReadOutput(matched.read.text) : matched.matched_line;
-
-					return {
-						content: [{ type: "text", text: `Matched: ${matched.matched_line}\n\n${text}` }],
-						details: withSnapshot({
-							action: "watch",
-							pane: resolved.alias || paneRef,
-							paneId: resolved.pane.pane_id,
-							matchedLine: matched.matched_line,
-						}),
+					const publishWatchUpdate = () => {
+						onUpdate?.({
+							content: [{ type: "text", text: `Watching ${paneLabel}...` }],
+							details: withSnapshot({
+								action: "watch",
+								pane: paneLabel,
+								paneId: resolved.pane.pane_id,
+								match,
+								elapsed: Math.floor((Date.now() - startTime) / 1000),
+							}),
+						});
 					};
+
+					publishWatchUpdate();
+					const updateTimer = onUpdate ? setInterval(publishWatchUpdate, 1000) : null;
+
+					try {
+						const args = ["wait", "output", resolved.pane.pane_id, "--match", match];
+						if (params.source) args.push("--source", params.source);
+						if (params.lines != null) args.push("--lines", String(params.lines));
+						if (params.timeout != null) args.push("--timeout", String(params.timeout));
+						if (params.regex) args.push("--regex");
+						if (params.raw) args.push("--raw");
+
+						const response = await execHerdrJson<{
+							result: {
+								type: string;
+								pane_id: string;
+								revision: number;
+								matched_line: string;
+								read: PaneReadResult;
+							};
+						}>(args, signal);
+						const matched = response.result;
+						const text = matched.read?.text ? formatReadOutput(matched.read.text) : matched.matched_line;
+
+						return {
+							content: [{ type: "text", text: `Matched: ${matched.matched_line}\n\n${text}` }],
+							details: withSnapshot({
+								action: "watch",
+								pane: paneLabel,
+								paneId: resolved.pane.pane_id,
+								matchedLine: matched.matched_line,
+								elapsed: Math.floor((Date.now() - startTime) / 1000),
+							}),
+						};
+					} finally {
+						if (updateTimer) clearInterval(updateTimer);
+					}
 				}
 
 				case "wait_agent": {
@@ -936,7 +959,9 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+
 			let text = theme.fg("toolTitle", theme.bold("herdr "));
 			text += theme.fg("accent", args.action || "?");
 			if (args.workspace) text += theme.fg("muted", ` ${args.workspace}`);
@@ -952,11 +977,26 @@ export default function (pi: ExtensionAPI) {
 			if (args.mode) text += theme.fg("dim", ` ${args.mode}`);
 			if (args.text) text += theme.fg("dim", ` › \"${args.text}\"`);
 			if (args.keys) text += theme.fg("dim", ` › ${args.keys}`);
-			return new Text(text, 0, 0);
+
+			component.setText(text);
+			return component;
 		},
 
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded, isPartial }, theme, context) {
 			const details = result.details as Record<string, any> | undefined;
+			const state = context.state as { watchElapsed?: number };
+			if (context.args?.action === "watch") {
+				if (isPartial) {
+					state.watchElapsed = typeof details?.elapsed === "number" ? details.elapsed : 0;
+					const pane = details?.pane || context.args?.pane || "?";
+					return new Text(
+						theme.fg("warning", `◌ watching ${pane}`) + theme.fg("dim", ` (${state.watchElapsed}s)`),
+						0,
+						0,
+					);
+				}
+				delete state.watchElapsed;
+			}
 			if (!details) {
 				const content = result.content?.[0];
 				return new Text(content?.type === "text" ? content.text : "", 0, 0);
@@ -987,6 +1027,7 @@ export default function (pi: ExtensionAPI) {
 				case "watch": {
 					let text = theme.fg("success", `✓ ${details.pane}`);
 					text += theme.fg("dim", ` › ${details.matchedLine}`);
+					if (typeof details.elapsed === "number") text += theme.fg("muted", ` (took ${details.elapsed}s)`);
 					return new Text(text, 0, 0);
 				}
 				case "wait_agent": {
