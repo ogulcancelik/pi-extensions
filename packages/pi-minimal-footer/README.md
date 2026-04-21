@@ -8,7 +8,7 @@ Minimal footer for [pi](https://github.com/badlogic/pi-mono) that replaces the d
 
 ## Features
 
-- **Context gauge** — working directory, git branch, model, thinking level, and context window usage with token counts
+- **Context gauge** — optional working directory and git branch, model, thinking level, and context window usage with token counts
 - **Subscription usage bars** — rolling window quotas with reset timers for supported providers
 - **Auto-refresh** — fetches usage on startup and model switch, then every 5 minutes
 - **Git integration** — branch name, dirty state, ahead/behind counts
@@ -29,6 +29,17 @@ Minimal footer for [pi](https://github.com/badlogic/pi-mono) that replaces the d
 ```bash
 pi install npm:@ogulcancelik/pi-minimal-footer
 ```
+
+## Configuration
+
+Environment variables (all optional):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PI_MINIMAL_FOOTER_SHOW_CWD` | Show current working directory in footer status line | `1` |
+| `PI_MINIMAL_FOOTER_SHOW_BRANCH` | Show git branch/dirty/ahead/behind in footer status line | `1` |
+
+Accepted false values: `0`, `false`, `no`, `off` (case-insensitive).
 
 ## How it works
 

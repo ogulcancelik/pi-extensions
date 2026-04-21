@@ -42,6 +42,19 @@ interface GitCache {
 const USAGE_REFRESH_INTERVAL = 5 * 60_000; // 5 minutes
 const usageCache = new Map<string, UsageSnapshot>(); // keyed by provider
 
+// ============ Env Flags ============
+
+function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return fallback;
+
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 // ============ Identity Cache ============
 
 let codexEmailPrefix: string | null | undefined; // undefined = not yet resolved
@@ -658,6 +671,10 @@ export default function (pi: ExtensionAPI) {
   const BAR_FILLED = "━";
   const BAR_EMPTY = "─";
 
+  // Optional visibility toggles (default: enabled)
+  const showCwd = parseBooleanEnv(process.env.PI_MINIMAL_FOOTER_SHOW_CWD, true);
+  const showBranch = parseBooleanEnv(process.env.PI_MINIMAL_FOOTER_SHOW_BRANCH, true);
+
   function formatTokenCount(tokens: number): string {
     if (tokens >= 1_000_000) {
       const m = tokens / 1_000_000;
@@ -920,7 +937,7 @@ export default function (pi: ExtensionAPI) {
           }
 
           let branchStr = "";
-          if (gitCache?.branch) {
+          if (showBranch && gitCache?.branch) {
             const branchColor = gitCache.dirty ? "warning" : "success";
             branchStr = theme.fg(branchColor, gitCache.branch);
             if (gitCache.dirty) branchStr += theme.fg("warning", " *");
@@ -941,9 +958,16 @@ export default function (pi: ExtensionAPI) {
 
           const sep = " " + theme.fg("dim", ">") + " ";
           const lines: string[] = [];
-          const pwdStr = theme.fg("accent", pwd);
+
+          const pwdStr = showCwd ? theme.fg("accent", pwd) : "";
+          const locationVariants: string[] = [];
+          if (pwdStr && branchStr) locationVariants.push(pwdStr + sep + branchStr);
+          if (pwdStr) locationVariants.push(pwdStr);
+          if (branchStr) locationVariants.push(branchStr);
+          const locationBlock = locationVariants.length > 0 ? fitFooterSegment(width, locationVariants) : "";
+
           const statusBlocks = [
-            fitFooterSegment(width, branchStr ? [pwdStr + sep + branchStr, pwdStr] : [pwdStr]),
+            locationBlock,
             fitFooterSegment(width, modelStr === plainModelStr ? [plainModelStr] : [modelStr, plainModelStr]),
             fitFooterSegment(width, [
               renderContextGauge(percentage, theme, ctxUsed, ctxTotal, {
