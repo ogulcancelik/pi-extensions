@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-minimal-footer",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Minimal footer for pi with context gauge and subscription usage bars",
   "type": "module",
   "keywords": [
