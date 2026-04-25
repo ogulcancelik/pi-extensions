@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-session-recall",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Search and query past pi sessions. Recall previous conversations on demand.",
   "type": "module",
   "keywords": [

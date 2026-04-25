@@ -664,8 +664,12 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 		name: "session_search",
 		label: (params) => `Session Search: ${params.query}`,
 		description:
-			"Search past conversation sessions by keywords. Use when the user references something from a previous session and you need to find it. " +
-			"Returns matching sessions with conversation snippets. Follow up with session_query to get detailed information from a specific session.",
+			"Find past sessions by literal text search. This is essentially `rg -i -F` over session JSONL files, not semantic search. " +
+			"Use one exact token or phrase. Spaces are exact spaces in an exact phrase, so only use spaces for wording you expect appeared in the session, such as an error message. " +
+			"Good examples: `libc++abi`, `Cannot find module '@sinclair/typebox'`, `Blender VAT bake`. " +
+			"Bad example: `build ci c lib dependency ghostty` because that searches for one exact phrase, not separate keywords. " +
+			"Do not combine independent keywords into one search string. If you need multiple unrelated terms, call session_search multiple times. " +
+			"After finding a likely session, use session_query for semantic questions.",
 		renderResult: (result, options, theme) => {
 			const container = new Container();
 			const text = result.content?.[0]?.type === "text" ? result.content[0].text : "";
@@ -694,7 +698,7 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			query: Type.String({
 				description:
-					"Search keywords (e.g., 'redis caching', 'blender vat bake'). Multiple words are searched as a phrase. Use simple, specific terms.",
+					"Literal search pattern passed to fixed-string ripgrep-style search. Use one distinctive token or exact phrase, not a bag of unrelated keywords. Spaces mean exact spaces in an exact phrase.",
 			}),
 		}),
 
@@ -715,7 +719,14 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 
 			if (allMatches.length === 0) {
 				return {
-					content: [{ type: "text" as const, text: `No sessions found matching "${query}".` }],
+					content: [
+						{
+							type: "text" as const,
+							text:
+								`No sessions found matching "${query}".\n\n` +
+								"session_search is literal fixed-string search, not semantic search. Retry with one exact distinctive token or phrase, such as a filename, package name, error text, function name, issue id, or unique term.",
+						},
+					],
 					details: { matchCount: 0 },
 				};
 			}
@@ -754,7 +765,14 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 
 			if (results.length === 0) {
 				return {
-					content: [{ type: "text" as const, text: `No readable matches found for "${query}".` }],
+					content: [
+						{
+							type: "text" as const,
+							text:
+								`No readable matches found for "${query}".\n\n` +
+								"session_search is literal fixed-string search, not semantic search. Retry with one exact distinctive token or phrase, such as a filename, package name, error text, function name, issue id, or unique term.",
+						},
+					],
 					details: { matchCount: 0 },
 				};
 			}

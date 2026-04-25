@@ -22,9 +22,9 @@ Two tools that let the agent recall past sessions:
 
 ### `session_search`
 
-Keyword search across all past sessions using ripgrep. Returns matching sessions with context snippets.
+Literal text search across all past sessions using ripgrep-style fixed-string matching. It is not semantic search. The agent should search for one distinctive token or exact phrase at a time, such as a filename, package name, error string, function name, issue id, or remembered wording.
 
-The agent uses this automatically when you reference something from a previous conversation — e.g. *"remember when we tried X?"*
+Spaces mean exact spaces in an exact phrase. For unrelated concepts, the agent should call `session_search` multiple times instead of combining them into one query.
 
 ### `session_query`
 
