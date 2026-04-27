@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-herdr",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Herdr-native workspace, tab, and pane orchestration for pi with output watches and agent status waits.",
   "type": "module",
   "keywords": [

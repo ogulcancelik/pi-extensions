@@ -34,7 +34,7 @@ Gives the agent a `herdr` tool with these actions:
 | **run** | Submit a line atomically with Enter in an existing pane |
 | **read** | Read output from a pane |
 | **watch** | Wait until pane output matches text or regex |
-| **wait_agent** | Wait until one or more agent panes reach one or more target statuses |
+| **wait_agent** | Wait until one or more panes running recognized coding agents reach one or more target statuses |
 | **send** | Send raw text or keys to a pane without implicit Enter |
 | **stop** | Close a pane |
 
@@ -63,12 +63,14 @@ That means the agent can do higher-level pane workflows with fewer brittle steps
 - `workspace_create` and `tab_create` use herdr's returned `root_pane` when available, with a pane-list fallback for older herdr versions
 - `run` only targets an existing pane alias or real pane id
 - If an alias no longer points to a live pane, the extension removes it and returns an error
-- `watch` uses `herdr wait output`
-- `wait_agent` uses herdr agent status information and can coordinate one pane or many panes
+- `watch` uses `herdr wait output` and is the right wait primitive for normal processes like tests, dev servers, and build logs
+- `wait_agent` uses herdr agent status information and can coordinate one pane or many panes that are running recognized coding agents
 - `watch` and `wait_agent` forward pi's abort signal, so Escape cancels the wait
 - `read` and `watch` support `visible`, `recent`, and `recent-unwrapped`
 
 ## Agent status semantics
+
+Use `wait_agent` only for panes running a recognized coding agent. Do not use it to wait for normal shell commands, test runners, build processes, or dev servers. Use `watch` for output conditions and `read` for inspection.
 
 When using `wait_agent`, herdr statuses mean:
 
@@ -173,7 +175,7 @@ List workspaces and tabs:
 ## Notes for agents
 
 - `pane_split`, `run`, `read`, `watch`, `wait_agent`, `send`, and `stop` target panes only. Do not pass tab ids to those actions.
-- `wait_agent` accepts either `pane`/`status` for single-pane waits or `panes`/`statuses` for multi-pane waits. Use `mode: "all"` or `mode: "any"` to control how multi-pane waits resolve.
+- `wait_agent` accepts either `pane`/`status` for single-pane waits or `panes`/`statuses` for multi-pane waits, but only for panes running recognized coding agents. Use `mode: "all"` or `mode: "any"` to control how multi-pane waits resolve.
 - `run` is the default way to submit a line or prompt to a pane because it sends text and Enter atomically.
 - `send` is low-level input only. It does not press Enter. If you want text plus Enter as one action, use `run` instead of `send` + `Enter`.
 - `run` only targets an existing pane. It never creates or restarts panes.
