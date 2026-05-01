@@ -15,14 +15,15 @@ Minimal footer for [pi](https://github.com/badlogic/pi-mono) that replaces the d
 
 ## Supported providers
 
-| Provider | What it shows |
-|----------|---------------|
-| Claude Max | 5h + weekly rolling windows |
-| OpenAI Codex | Primary + secondary rolling windows |
-| GitHub Copilot | Premium interactions + chat quotas |
-| Google Gemini | Pro + Flash remaining quotas |
-| MiniMax | 5h + weekly rolling windows (Token Plan / Coding Plan) |
-| MiniMax CN | Same as MiniMax, China endpoint |
+| Provider       | What it shows                                          |
+| -------------- | ------------------------------------------------------ |
+| Claude Max     | 5h + weekly rolling windows                            |
+| OpenAI Codex   | Primary + secondary rolling windows                    |
+| GitHub Copilot | Premium interactions + chat quotas                     |
+| Google Gemini  | Pro + Flash remaining quotas                           |
+| MiniMax        | 5h + weekly rolling windows (Token Plan / Coding Plan) |
+| MiniMax CN     | Same as MiniMax, China endpoint                        |
+| Kimi Coding    | 5h + weekly rolling windows (Plan)                     |
 
 ## Install
 
@@ -34,10 +35,10 @@ pi install npm:@ogulcancelik/pi-minimal-footer
 
 Environment variables (all optional):
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PI_MINIMAL_FOOTER_SHOW_CWD` | Show current working directory in footer status line | `1` |
-| `PI_MINIMAL_FOOTER_SHOW_BRANCH` | Show git branch/dirty/ahead/behind in footer status line | `1` |
+| Variable                        | Description                                              | Default |
+| ------------------------------- | -------------------------------------------------------- | ------- |
+| `PI_MINIMAL_FOOTER_SHOW_CWD`    | Show current working directory in footer status line     | `1`     |
+| `PI_MINIMAL_FOOTER_SHOW_BRANCH` | Show git branch/dirty/ahead/behind in footer status line | `1`     |
 
 Accepted false values: `0`, `false`, `no`, `off` (case-insensitive).
 
@@ -46,11 +47,13 @@ Accepted false values: `0`, `false`, `no`, `off` (case-insensitive).
 The footer reads context usage from the last assistant message's token counts (free — comes with every LLM response). Subscription usage is fetched from each provider's dedicated quota API using your existing auth tokens from `~/.pi/agent/auth.json` or environment variables.
 
 Usage is fetched:
+
 - Once on startup
 - Immediately on model switch (Ctrl+P)
 - Every 5 minutes after that
 
 Git state is refreshed:
+
 - Once on startup
 - When pi reports a branch change
 - At the end of each turn

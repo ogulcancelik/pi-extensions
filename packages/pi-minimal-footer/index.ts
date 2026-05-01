@@ -263,6 +263,10 @@ function getMinimaxToken(provider: "minimax" | "minimax-cn"): string | undefined
     : getApiKey("minimax-cn", "MINIMAX_CN_API_KEY");
 }
 
+function getKimiToken(): string | undefined {
+  return getApiKey("kimi-coding", "KIMI_API_KEY");
+}
+
 // ============ Time Formatting ============
 
 function formatResetTime(date: Date): string {
@@ -627,6 +631,69 @@ async function fetchMinimaxUsage(provider: "minimax" | "minimax-cn"): Promise<Us
   }
 }
 
+async function fetchKimiUsage(): Promise<UsageSnapshot> {
+  const token = getKimiToken();
+  const endpoint = "https://api.kimi.com/coding/v1/usages";
+  if (!token) {
+    return { provider: "Kimi Coding", windows: [], error: "no-auth", fetchedAt: Date.now() };
+  }
+
+  try {
+    const res = await fetchWithTimeout(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      return { provider: "Kimi Coding", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+    }
+
+    const data = (await res.json()) as any;
+    const windows: RateWindow[] = [];
+
+    for (const limit of data.limits || []) {
+      const windowLimit = Number(limit.detail?.limit) || 0;
+      const windowRemaining = Number(limit.detail?.remaining) || 0;
+      if (windowLimit > 0) {
+        const used = windowLimit - windowRemaining;
+        const usedPercent = clampPercent((used / windowLimit) * 100);
+        const resetDate = limit.detail?.resetTime ? new Date(limit.detail.resetTime) : undefined;
+        const durationMs =
+          limit.window?.duration && limit.window?.timeUnit === "TIME_UNIT_MINUTE"
+            ? limit.window.duration * 60 * 1000
+            : undefined;
+
+        windows.push({
+          label: getWindowLabel(durationMs, "5h"),
+          usedPercent,
+          resetsIn: resetDate ? formatResetTime(resetDate) : undefined,
+        });
+      }
+    }
+
+    const weeklyLimit = Number(data.usage?.limit) || 0;
+    const weeklyRemaining = Number(data.usage?.remaining) || 0;
+    const weeklyResetTime = data.usage?.resetTime;
+
+    if (weeklyLimit > 0) {
+      const used = weeklyLimit - weeklyRemaining;
+      const usedPercent = clampPercent((used / weeklyLimit) * 100);
+      windows.push({
+        label: "Weekly",
+        usedPercent,
+        resetsIn: weeklyResetTime ? formatResetTime(new Date(weeklyResetTime)) : undefined,
+      });
+    }
+
+    return { provider: "Kimi Coding", windows, fetchedAt: Date.now() };
+  } catch (e) {
+    return { provider: "Kimi Coding", windows: [], error: String(e), fetchedAt: Date.now() };
+  }
+}
+
 // ============ Provider Detection ============
 
 // Map pi provider names to our internal usage provider keys
@@ -637,6 +704,7 @@ const PROVIDER_MAP: Record<string, string> = {
   "google-gemini-cli": "gemini", // Gemini CLI subscription
   minimax: "minimax", // MiniMax Token Plan / Coding Plan
   "minimax-cn": "minimax-cn", // MiniMax China plan
+  "kimi-coding": "kimi-coding", // Kimi plan
 };
 
 function detectProvider(modelProvider: string): string | null {
@@ -657,6 +725,8 @@ async function fetchUsageForProvider(provider: string): Promise<UsageSnapshot> {
       return fetchMinimaxUsage("minimax");
     case "minimax-cn":
       return fetchMinimaxUsage("minimax-cn");
+    case "kimi-coding":
+      return fetchKimiUsage();
     default:
       return { provider: "Unknown", windows: [], error: "unknown-provider", fetchedAt: Date.now() };
   }
@@ -831,7 +901,7 @@ export default function (pi: ExtensionAPI) {
   let latestUsage: UsageSnapshot | null = null;
   let activeProvider: string | null = null; // internal provider key for the current model
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
-  
+
   // Store tui reference for triggering re-renders from event handlers
   let tuiRef: { requestRender: () => void } | null = null;
 
@@ -907,7 +977,7 @@ export default function (pi: ExtensionAPI) {
 
     ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
       tuiRef = tui;
-      
+
       const unsub = footerData.onBranchChange(() => {
         refreshGitFooter();
       });
