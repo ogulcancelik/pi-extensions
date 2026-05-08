@@ -100,7 +100,7 @@ const SourceEnum = StringEnum(["visible", "recent", "recent-unwrapped"] as const
 });
 
 const DirectionEnum = StringEnum(["right", "down"] as const, {
-	description: "Split direction for pane_split",
+	description: "Split direction for pane_split. Defaults to right.",
 });
 
 const WaitModeEnum = StringEnum(["all", "any"] as const, {
@@ -464,7 +464,7 @@ export default function (pi: ExtensionAPI) {
 			"For agent panes, background finished panes usually become `done` while focused finished panes usually become `idle`.",
 			"Use `recent-unwrapped` when you need log matching or reads that ignore soft wrapping.",
 			"Pane references can be either friendly aliases you created earlier or real herdr pane ids from `list`.",
-			"Use `pane_split`, `tab_create`, or `workspace_create` to establish new pane targets. `pane_split` defaults to the agent's own pane when pane is omitted. `run` only works with an existing pane alias or pane id.",
+			"Use `pane_split`, `tab_create`, or `workspace_create` to establish new pane targets. `pane_split` defaults to the agent's own pane when pane is omitted and splits right when direction is omitted. `run` only works with an existing pane alias or pane id.",
 			"Use friendly pane aliases like `server`, `reviewer`, or `tests` so later reads, watches, and sends can reuse them across the session.",
 			"When starting a fresh pi instance in another pane and the model matters, either specify `--model` explicitly or ask the user which model/provider they want.",
 		],
@@ -665,8 +665,7 @@ export default function (pi: ExtensionAPI) {
 				case "pane_split": {
 					rejectUnexpectedParams("pane_split", params, ["workspace", "tab"]);
 					const paneRef = params.pane ?? currentPaneId;
-					const direction = params.direction;
-					if (!direction) throw new Error("'direction' is required for pane_split");
+					const direction = params.direction ?? "right";
 
 					const sourcePane = await requirePaneRef(paneRef, currentWorkspaceId, signal);
 					const args = ["pane", "split", sourcePane.pane.pane_id, "--direction", direction];

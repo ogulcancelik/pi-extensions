@@ -59,7 +59,7 @@ That means the agent can do higher-level pane workflows with fewer brittle steps
 - Pane actions target pane identity. Use friendly aliases like `server` or `tests`, or real herdr pane ids from create/list results
 - Alias state is stored in tool result details and reconstructed on session load and branch changes
 - The extension preserves current focus by default. Creation flows stay in the current UI context unless `focus: true` is passed explicitly.
-- `pane_split` creates a sibling pane from the agent's own pane by default, or from an explicit pane alias/id in the current workspace, and can remember it under `newPane`
+- `pane_split` creates a right sibling pane from the agent's own pane by default, or from an explicit pane alias/id in the current workspace, and can remember it under `newPane`
 - `workspace_create` and `tab_create` use herdr's returned `root_pane` when available, with a pane-list fallback for older herdr versions
 - `run` only targets an existing pane alias or real pane id
 - If an alias no longer points to a live pane, the extension removes it and returns an error
@@ -102,10 +102,10 @@ If model choice matters and the user has not specified one, the agent should ask
 
 ## Example workflows
 
-Split the agent's own pane and remember the new sibling pane as `reviewer`:
+Split the agent's own pane to the right by default and remember the new sibling pane as `reviewer`:
 
 ```json
-{ "action": "pane_split", "direction": "right", "newPane": "reviewer" }
+{ "action": "pane_split", "newPane": "reviewer" }
 ```
 
 Split an explicit existing pane instead:
@@ -186,7 +186,7 @@ List workspaces and tabs:
 - `send` is low-level input only. It does not press Enter. If you want text plus Enter as one action, use `run` instead of `send` + `Enter`.
 - `run` only targets an existing pane. It never creates or restarts panes.
 - If an alias is stale, the extension removes it and returns an error.
-- `pane_split` requires `direction`, accepts optional `pane`, `newPane`, `cwd`, and `focus`, and returns the created pane. If `pane` is omitted, it splits the agent's own pane.
+- `pane_split` accepts optional `pane`, `direction`, `newPane`, `cwd`, and `focus`, and returns the created pane. If `pane` is omitted, it splits the agent's own pane. If `direction` is omitted, it splits right.
 - `tab_create` and `workspace_create` accept `label` and preserve current focus unless `focus: true` is passed explicitly.
 - If you already know a real pane id from `list` or another herdr response, you can use it directly in `run`, `read`, `watch`, `wait_agent`, `send`, `stop`, or `focus`, even outside the alias map, as long as it belongs to the agent's current workspace.
 - Herdr does not currently expose direct pane focus. `focus` with a pane id focuses the pane's tab.
