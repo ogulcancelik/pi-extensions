@@ -13,6 +13,12 @@ import {
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Input, Key, matchesKey, truncateToWidth, visibleWidth, type Focusable, type KeybindingsManager, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
+const OSC133_PROMPT_MARKER_RE = /\x1b\]133;[ABC]\x07/g;
+
+function stripPromptMarkers(lines: string[]): string[] {
+	return lines.map((line) => line.replace(OSC133_PROMPT_MARKER_RE, ""));
+}
+
 class GhostOverlayComponent implements Focusable {
 	private readonly transcriptContainer = new Container();
 	private readonly input = new Input();
@@ -96,7 +102,7 @@ class GhostOverlayComponent implements Focusable {
 			return this.cachedTranscriptLines;
 		}
 
-		const lines = this.transcriptContainer.render(width);
+		const lines = stripPromptMarkers(this.transcriptContainer.render(width));
 		this.cachedTranscriptLines = lines;
 		this.cachedTranscriptWidth = width;
 		return lines;

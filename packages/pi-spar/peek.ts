@@ -36,6 +36,12 @@ import * as path from "path";
 // Constants
 // =============================================================================
 
+const OSC133_PROMPT_MARKER_RE = /\x1b\]133;[ABC]\x07/g;
+
+function stripPromptMarkers(lines: string[]): string[] {
+	return lines.map((line) => line.replace(OSC133_PROMPT_MARKER_RE, ""));
+}
+
 function getSessionFile(sessionId: string): string {
 	return path.join(SESSION_DIR, `${sessionId}.jsonl`);
 }
@@ -656,16 +662,16 @@ export class SparPeekOverlay {
 		if (this.cachedLines && this.cachedWidth === innerW) {
 			contentLines = this.cachedLines;
 		} else {
-			contentLines = this.chatContainer.render(innerW);
+			contentLines = stripPromptMarkers(this.chatContainer.render(innerW));
 			this.cachedLines = contentLines;
 			this.cachedWidth = innerW;
 		}
 
 		// ── Scrolling ──
 		const termRows = this.tui.terminal.rows;
-		const maxHeight = Math.min(60, termRows - 4);
+		const maxHeight = Math.min(60, Math.max(8, termRows - 4));
 		const chromeLines = 4; // header + separator + footer + bottom border
-		const maxVisible = Math.max(10, maxHeight - chromeLines);
+		const maxVisible = Math.max(4, maxHeight - chromeLines);
 		const maxScroll = Math.max(0, contentLines.length - maxVisible);
 		this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
 
@@ -673,6 +679,9 @@ export class SparPeekOverlay {
 		for (const line of visible) {
 			const padded = line + " ".repeat(Math.max(0, innerW - visibleWidth(line)));
 			lines.push(th.fg("border", "│") + truncateToWidth(padded, innerW) + th.fg("border", "│"));
+		}
+		for (let i = visible.length; i < maxVisible; i++) {
+			lines.push(th.fg("border", "│") + " ".repeat(innerW) + th.fg("border", "│"));
 		}
 
 		// ── Footer ──
