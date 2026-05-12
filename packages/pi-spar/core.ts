@@ -35,6 +35,7 @@ export interface SparModelConfig {
 	alias: string;     // short name like "gpt5", "opus"
 	provider: string;  // pi provider like "openai", "anthropic"
 	id: string;        // model id like "gpt-5.4", "claude-opus-4-6"
+	when?: string;     // optional guidance: when to use this model
 }
 
 export interface SparConfig {
@@ -69,10 +70,14 @@ function getModelAliases(): Record<string, string> {
 export function getConfiguredModelsDescription(): string {
 	const config = loadSparConfig();
 	if (config.models.length === 0) {
-		return "No models configured. Run /spar-models to set up sparring models.";
+		return "No models configured. Edit ~/.pi/agent/spar/config.json to add models.";
 	}
 	return config.models
-		.map(m => `- \`${m.alias}\` - ${m.provider}/${m.id}`)
+		.map(m => {
+			let line = `- \`${m.alias}\` — ${m.provider}/${m.id}`;
+			if (m.when) line += ` — ${m.when}`;
+			return line;
+		})
 		.join("\n");
 }
 

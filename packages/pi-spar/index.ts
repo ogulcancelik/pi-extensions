@@ -8,17 +8,14 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "@sinclair/typebox";
-import { Text, Container, Spacer, SelectList, Input, matchesKey, truncateToWidth, type SelectItem, type SelectListTheme } from "@earendil-works/pi-tui";
+import { Text, Container, Spacer, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	sendMessage,
 	listSessions,
 	getSession,
 	getSessionHistory,
 	getConfiguredModelsDescription,
-	loadSparConfig,
-	saveSparConfig,
 	deleteSession,
-	type SparModelConfig,
 	DEFAULT_TIMEOUT,
 } from "./core.js";
 import {
@@ -31,25 +28,9 @@ import {
 	formatAge,
 } from "./peek.js";
 
-/** Suggest a short alias for a provider/model combo */
-function suggestAlias(provider: string, modelId: string): string {
-	const id = modelId.toLowerCase();
-	if (id.includes("opus")) return "opus";
-	if (id.includes("sonnet")) return "sonnet";
-	if (id.includes("haiku")) return "haiku";
-	if (id.includes("gpt-5")) return "gpt5";
-	if (id.includes("gpt-4")) return "gpt4";
-	if (id.includes("o3")) return "o3";
-	if (id.includes("o4")) return "o4";
-	if (id.includes("gemini")) return "gemini";
-	if (id.includes("deepseek")) return "deepseek";
-	// Fallback: first meaningful chunk of model id
-	return id.replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").slice(0, 12);
-}
-
 export default function (pi: ExtensionAPI) {
 	// ==========================================================================
-	// Tool Registration — model aliases are configured via /spmodels
+	// Tool Registration — models are configured in ~/.pi/agent/spar/config.json
 	// ==========================================================================
 
 	pi.registerTool({
@@ -67,6 +48,9 @@ Prefer a different model family when possible.
 **Important:**
 - if they raise a point you hadn't considered, dig into it. If you disagree, counter it. Don't take the first response and run.
 - Give file paths and pointers, not full content.
+
+**This is a back-and-forth discussion tool, not one-shot Q&A.**
+If the peer's answer raises side questions, you disagree, or you want to push deeper, reuse the same \`session\` name and call \`send\` again. The conversation persists. Keep the thread going until the point is actually resolved.
 
 **Configured models:**
 ${getConfiguredModelsDescription()}
@@ -88,7 +72,7 @@ ${getConfiguredModelsDescription()}
 				description: "Message to send (required for send)",
 			})),
 			model: Type.Optional(Type.String({
-				description: "Model alias (from /spmodels) or provider:model. Required for first message in a session.",
+				description: "Model alias (from config) or provider:model. Required for first message in a session.",
 			})),
 			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high"] as const, {
 				description: "Thinking level (default: high)",
@@ -404,172 +388,6 @@ ${getConfiguredModelsDescription()}
 				text += "\n\n" + theme.fg("dim", `[${usage.input} in / ${usage.output} out, $${usage.cost.toFixed(4)}]`);
 			}
 			return new Text(text, 0, 0);
-		},
-	});
-
-	// ==========================================================================
-	// Command: /spmodels — configure available sparring models
-	// ==========================================================================
-
-	pi.registerCommand("spmodels", {
-		description: "Configure models available for sparring",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("Interactive mode required for /spmodels", "warning");
-				return;
-			}
-
-			const available = ctx.modelRegistry.getAvailable();
-			if (available.length === 0) {
-				ctx.ui.notify("No models available. Configure API keys first.", "warning");
-				return;
-			}
-
-			const config = loadSparConfig();
-			const configuredAliases = new Map(config.models.map(m => [`${m.provider}/${m.id}`, m.alias]));
-
-			// Build items: configured models marked, unconfigured available
-			const items: SelectItem[] = available.map(m => {
-				const key = `${m.provider}/${m.id}`;
-				const alias = configuredAliases.get(key);
-				return {
-					value: key,
-					label: alias ? `${key} (${alias})` : key,
-					description: alias ? "configured" : undefined,
-				};
-			});
-
-			const result = await ctx.ui.custom<{ action: "add" | "remove"; model: string } | undefined>(
-				(tui, theme, _kb, done) => {
-					const selectTheme: SelectListTheme = {
-						selectedPrefix: (t: string) => theme.fg("accent", t),
-						selectedText: (t: string) => theme.fg("accent", t),
-						description: (t: string) => theme.fg("success", t),
-						scrollInfo: (t: string) => theme.fg("dim", t),
-						noMatch: (t: string) => theme.fg("warning", t),
-					};
-
-					const container = new Container();
-					container.addChild(new Text(
-						theme.bold(theme.fg("accent", "Spar Models")) +
-						theme.fg("muted", "  (enter to add/edit alias, backspace to remove)"),
-						0, 0,
-					));
-					container.addChild(new Spacer(1));
-
-					// Show current config
-					if (config.models.length > 0) {
-						const configText = config.models
-							.map(m => theme.fg("dim", "  ") + theme.fg("accent", m.alias) + theme.fg("dim", ` → ${m.provider}/${m.id}`))
-							.join("\n");
-						container.addChild(new Text(theme.fg("muted", "  Current:") + "\n" + configText, 0, 0));
-						container.addChild(new Spacer(1));
-					}
-
-					const input = new Input();
-					container.addChild(input);
-					container.addChild(new Spacer(1));
-
-					let list = buildList(items);
-					container.addChild(list);
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(
-						theme.fg("dim", "  ↑/↓ navigate · type to filter · enter add/edit · backspace remove · esc close"),
-						0, 0,
-					));
-
-					function buildList(filtered: SelectItem[]): SelectList {
-						const sl = new SelectList(filtered, Math.min(filtered.length, 12), selectTheme);
-						sl.onSelect = (item) => done({ action: "add", model: item.value });
-						sl.onCancel = () => done(undefined);
-						return sl;
-					}
-
-					function rebuildList() {
-						const query = input.getValue();
-						const filtered = query
-							? items.filter(i => i.label.toLowerCase().includes(query.toLowerCase()))
-							: items;
-						container.removeChild(list);
-						list = buildList(filtered);
-						// Insert after the spacer that follows input
-						const children = container.children;
-						const inputIdx = children.indexOf(input);
-						children.splice(inputIdx + 2, 0, list);
-						tui.requestRender();
-					}
-
-					input.onSubmit = () => {
-						const selected = list.getSelectedItem();
-						if (selected) done({ action: "add", model: selected.value });
-					};
-					input.onEscape = () => done(undefined);
-
-					container.handleInput = (data: string) => {
-						if (data === "\x1b[A" || data === "\x1b[B" || data === "\r" || data === "\n") {
-							list.handleInput(data);
-						} else if (data === "\x1b" || data === "\x03") {
-							done(undefined);
-						} else if (data === "\x7f" || data === "\b") {
-							// Backspace: if input empty, remove selected model's config
-							if (input.getValue() === "") {
-								const selected = list.getSelectedItem();
-								if (selected && configuredAliases.has(selected.value)) {
-									done({ action: "remove", model: selected.value });
-								}
-							} else {
-								input.handleInput(data);
-								rebuildList();
-							}
-						} else {
-							input.handleInput(data);
-							rebuildList();
-						}
-					};
-
-					return container;
-				},
-			);
-
-			if (!result) return;
-
-			if (result.action === "remove") {
-				const [provider, ...idParts] = result.model.split("/");
-				const id = idParts.join("/");
-				config.models = config.models.filter(m => !(m.provider === provider && m.id === id));
-				saveSparConfig(config);
-				ctx.ui.notify(`Removed ${result.model} from spar models. Restart pi to update.`, "info");
-				return;
-			}
-
-			// action === "add" — prompt for alias
-			const [provider, ...idParts] = result.model.split("/");
-			const id = idParts.join("/");
-
-			// Check if already configured
-			const existing = config.models.find(m => m.provider === provider && m.id === id);
-			const defaultAlias = existing?.alias || suggestAlias(provider, id);
-
-			const alias = await ctx.ui.input(
-				`Alias for ${result.model}:`,
-				defaultAlias,
-			);
-
-			if (!alias?.trim()) return;
-
-			const cleanAlias = alias.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
-			if (!cleanAlias) {
-				ctx.ui.notify("Invalid alias — use letters, numbers, hyphens, underscores", "error");
-				return;
-			}
-
-			// Remove any existing entry for this model or alias
-			config.models = config.models.filter(m =>
-				!(m.provider === provider && m.id === id) && m.alias !== cleanAlias
-			);
-			config.models.push({ alias: cleanAlias, provider, id });
-			saveSparConfig(config);
-			ctx.ui.notify(`Configured ${cleanAlias} → ${result.model}. Restart pi to update.`, "info");
 		},
 	});
 
