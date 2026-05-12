@@ -10,15 +10,20 @@ pi install npm:@ogulcancelik/pi-spar
 
 ## Setup
 
-Configure which models are available for sparring:
+Configure which models are available for sparring by editing `~/.pi/agent/spar/config.json`:
 
+```json
+{
+  "models": [
+    { "alias": "opus", "provider": "anthropic", "id": "claude-opus-4.7", "when": "best for deep reasoning" },
+    { "alias": "minimax", "provider": "minimax", "id": "minimax-m2.7", "when": "great ui/ux eye, weaker on code" }
+  ]
+}
 ```
-/spmodels
-```
 
-This shows all models from your pi configuration and lets you assign short aliases (e.g., `opus`, `gpt`).
+Each entry needs `alias`, `provider`, and `id`. The optional `when` field is shown in the tool description to help the agent pick the right model for the task.
 
-> **Note:** After changing model aliases, restart pi for the agent to see the updated aliases. The aliases work immediately for tool execution, but the agent's tool description updates on next startup.
+> **Note:** Changes are picked up on the next `spar` tool call — no restart needed. The `when` text is included in the live tool description the agent sees.
 
 ## Usage
 
@@ -39,7 +44,6 @@ Sessions persist — follow up, push back, disagree. The peer can read files, gr
 
 | Command | Description |
 |---------|-------------|
-| `/spmodels` | Configure available sparring models |
 | `/spar [session]` | Watch a spar session in a floating overlay |
 | `/spview` | Browse all sessions — view, peek, or delete |
 
