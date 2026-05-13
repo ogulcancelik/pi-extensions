@@ -1,0 +1,47 @@
+{
+  "name": "@ogulcancelik/pi-model-agents",
+  "version": "0.1.0",
+  "description": "Load model-specific AGENTS.md instructions in pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agents",
+    "agents-md",
+    "model-agents",
+    "model-specific",
+    "system-prompt",
+    "prompt",
+    "context",
+    "instructions",
+    "model-routing",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-model-agents"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-model-agents#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
