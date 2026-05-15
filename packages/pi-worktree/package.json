@@ -1,0 +1,38 @@
+{
+  "name": "@ogulcancelik/pi-worktree",
+  "version": "0.1.0",
+  "description": "Relocate the active pi session to a git worktree while preserving conversation history.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "git",
+    "worktree",
+    "session-relocation",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-worktree"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-worktree#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
