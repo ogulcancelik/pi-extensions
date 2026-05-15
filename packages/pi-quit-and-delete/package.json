@@ -1,0 +1,37 @@
+{
+  "name": "@ogulcancelik/pi-quit-and-delete",
+  "version": "0.1.0",
+  "description": "Keyboard shortcut to quit pi and permanently delete the active session file.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "shortcut",
+    "session",
+    "cleanup"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-quit-and-delete"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-quit-and-delete#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
