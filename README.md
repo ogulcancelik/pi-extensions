@@ -6,6 +6,7 @@ Extensions for [pi](https://github.com/earendil-works/pi), the terminal-based co
 |---------|-------------|
 | [pi-ghost](packages/pi-ghost) | Ephemeral side conversation overlay — open a temporary ghost session inside the current pi UI |
 | [pi-ghostty-theme-sync](packages/pi-ghostty-theme-sync) | Sync pi theme with Ghostty terminal colors |
+| [pi-quit-and-delete](packages/pi-quit-and-delete) | Keyboard shortcut to quit pi and permanently delete the active session file |
 | [pi-goal](packages/pi-goal) | Break work into tasks, spawn parallel worker agents |
 | [pi-handoff](packages/pi-handoff) | Transfer context to a new session with full briefing |
 | [pi-herdr](packages/pi-herdr) | Herdr-native pane, tab, and workspace orchestration for long-running workflows |
