@@ -1,7 +1,7 @@
 {
   "name": "@ogulcancelik/pi-worktree",
-  "version": "0.1.0",
-  "description": "Relocate the active pi session to a git worktree while preserving conversation history.",
+  "version": "0.1.1",
+  "description": "Relocate the active pi session to another git working tree while preserving conversation history.",
   "type": "module",
   "keywords": [
     "pi-package",

@@ -35,21 +35,21 @@ export default function (pi: ExtensionAPI) {
 		name: "switch_worktree",
 		label: "Switch Worktree",
 		description:
-			"Use this immediately after creating a new git worktree (or when you want to resume work in an existing one) " +
-			"that is not the current cwd. It validates the worktree, then prefills the editor so you can press Enter to " +
-			"relocate the active pi session there. The conversation history is preserved and continues from the new worktree directory.",
-		promptSnippet: "Move the active session to a git worktree you just created (or want to resume work in)",
+			"Use this immediately after creating a new git worktree or switching to another git repository " +
+			"that is not the current cwd. It validates the target git working tree, then prefills the editor so you can press Enter to " +
+			"relocate the active pi session there. The conversation history is preserved and continues from the new directory.",
+		promptSnippet: "Move the active session to another git working tree",
 		promptGuidelines: [
 			"Use switch_worktree when you have just created a new git worktree and want to start working in it.",
-			"Also use switch_worktree when you want to resume work in an existing worktree that is not the current cwd.",
-			"Do not use this tool if you are already inside the target worktree; the session is already there.",
+			"Also use switch_worktree when you want to resume work in another git repository that is not the current cwd.",
+			"Do not use this tool if you are already inside the target git working tree; the session is already there.",
 			"After calling this tool, tell the user to press Enter to complete the relocation.",
 		],
 		parameters: Type.Object({
 			path: Type.String({
 				description:
-					"Absolute or relative path to the worktree directory. " +
-					"Must be a valid git worktree registered with git worktree add.",
+					"Absolute or relative path to the target directory. " +
+					"Must be inside a non-bare git working tree.",
 			}),
 		}),
 
@@ -65,27 +65,8 @@ export default function (pi: ExtensionAPI) {
 				throw new Error(`Path does not exist: ${targetPath}`);
 			}
 
-			const porcelain = await pi.exec(
-				"git",
-				["worktree", "list", "--porcelain"],
-				{ cwd: ctx.cwd, signal, timeout: 5000 },
-			);
-			if (porcelain.code !== 0) {
-				throw new Error(`Failed to list worktrees: ${porcelain.stderr || porcelain.stdout}`);
-			}
-
 			const canonicalTarget = await realpath(targetPath);
-			const worktrees = await parsePorcelain(porcelain.stdout);
-			const match = worktrees.find((w) => w.canonical === canonicalTarget);
-			if (match?.bare) {
-				throw new Error(`Bare worktrees are not supported: ${canonicalTarget}`);
-			}
-			if (!match) {
-				throw new Error(
-					`Not a registered git worktree: ${targetPath}\n` +
-						`Registered worktrees:\n${worktrees.map((w) => `  ${w.path}`).join("\n")}`,
-				);
-			}
+			const targetGit = await validateGitWorkingTree(pi, canonicalTarget, signal);
 
 			ctx.ui.setEditorText(`/switch-worktree ${canonicalTarget}`);
 			ctx.ui.notify("Press Enter to switch worktree", "info");
@@ -96,19 +77,19 @@ export default function (pi: ExtensionAPI) {
 					{
 						type: "text",
 						text:
-							`Validated worktree: ${canonicalTarget}\n` +
-							`Branch: ${displayBranch(match.branch)}\n\n` +
+							`Validated git working tree: ${canonicalTarget}\n` +
+							`Branch: ${displayBranch(targetGit.branch)}\n\n` +
 							`The editor is prefilled with the switch command. Press Enter to relocate the session.`,
 					},
 				],
-				details: { worktreePath: canonicalTarget, branch: match.branch },
+				details: { worktreePath: canonicalTarget, branch: targetGit.branch },
 				terminate: true,
 			};
 		},
 	});
 
 	pi.registerCommand("switch-worktree", {
-		description: "Relocate the active session to a git worktree",
+		description: "Relocate the active session to another git working tree",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 
@@ -135,24 +116,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const porcelain = await pi.exec("git", ["worktree", "list", "--porcelain"], {
-				cwd: ctx.cwd,
-				timeout: 5000,
-			});
-			if (porcelain.code !== 0) {
-				ctx.ui.notify(`Cannot verify worktrees: ${porcelain.stderr || porcelain.stdout}`, "error");
-				clearWorktreeBlock(pi, ctx);
-				return;
-			}
-			const worktrees = await parsePorcelain(porcelain.stdout);
-			const match = worktrees.find((w) => w.canonical === canonicalTarget);
-			if (match?.bare) {
-				ctx.ui.notify(`Bare worktrees are not supported: ${canonicalTarget}`, "error");
-				clearWorktreeBlock(pi, ctx);
-				return;
-			}
-			if (!match) {
-				ctx.ui.notify(`Not a registered git worktree: ${canonicalTarget}`, "error");
+			let targetGit: GitWorkingTreeInfo;
+			try {
+				targetGit = await validateGitWorkingTree(pi, canonicalTarget);
+			} catch (err: any) {
+				ctx.ui.notify(err.message, "error");
 				clearWorktreeBlock(pi, ctx);
 				return;
 			}
@@ -166,7 +134,7 @@ export default function (pi: ExtensionAPI) {
 
 			const ok = await ctx.ui.confirm(
 				"Switch worktree?",
-				`Relocate session to:\n${canonicalTarget}\n\nBranch: ${displayBranch(match.branch)}`,
+				`Relocate session to:\n${canonicalTarget}\n\nBranch: ${displayBranch(targetGit.branch)}`,
 			);
 			if (!ok) {
 				clearWorktreeBlock(pi, ctx);
@@ -202,7 +170,7 @@ export default function (pi: ExtensionAPI) {
 							// Best-effort cleanup; don't block the switch on unlink failure.
 						}
 						clearWorktreeBlock(pi, newCtx);
-						newCtx.ui.notify(`Session relocated to worktree: ${canonicalTarget}`, "success");
+						newCtx.ui.notify(`Session relocated to worktree: ${canonicalTarget}`, "info");
 
 						// Trigger the next agent turn so work continues automatically.
 						try {
@@ -244,46 +212,49 @@ function displayBranch(branch?: string): string {
 	return branch.replace(/^refs\/heads\//, "");
 }
 
-interface WorktreeInfo {
-	path: string;
-	canonical: string;
-	head?: string;
+interface GitWorkingTreeInfo {
 	branch?: string;
-	detached?: boolean;
-	bare?: boolean;
 }
 
-async function parsePorcelain(stdout: string): Promise<WorktreeInfo[]> {
-	const worktrees: WorktreeInfo[] = [];
-	let current: Partial<WorktreeInfo> = {};
-
-	for (const raw of stdout.split("\n")) {
-		const line = raw.trimEnd();
-		if (!line) {
-			if (current.path) {
-				worktrees.push(current as WorktreeInfo);
-			}
-			current = {};
-			continue;
+async function validateGitWorkingTree(
+	pi: ExtensionAPI,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<GitWorkingTreeInfo> {
+	const inside = await pi.exec("git", ["rev-parse", "--is-inside-work-tree"], {
+		cwd,
+		signal,
+		timeout: 5000,
+	});
+	if (inside.code !== 0 || inside.stdout.trim() !== "true") {
+		const bare = await pi.exec("git", ["rev-parse", "--is-bare-repository"], {
+			cwd,
+			signal,
+			timeout: 5000,
+		});
+		if (bare.code === 0 && bare.stdout.trim() === "true") {
+			throw new Error(`Bare git repositories are not supported: ${cwd}`);
 		}
-
-		if (line.startsWith("worktree ")) {
-			current.path = line.slice(9);
-			current.canonical = await realpath(current.path).catch(() => current.path!);
-		} else if (line.startsWith("HEAD ")) {
-			current.head = line.slice(5);
-		} else if (line.startsWith("branch ")) {
-			current.branch = line.slice(7);
-		} else if (line === "detached") {
-			current.detached = true;
-		} else if (line === "bare") {
-			current.bare = true;
-		}
+		throw new Error(`Not a git working tree: ${cwd}`);
 	}
 
-	if (current.path) {
-		worktrees.push(current as WorktreeInfo);
+	const bare = await pi.exec("git", ["rev-parse", "--is-bare-repository"], {
+		cwd,
+		signal,
+		timeout: 5000,
+	});
+	if (bare.code !== 0) {
+		throw new Error(`Cannot verify git repository: ${bare.stderr || bare.stdout}`);
+	}
+	if (bare.stdout.trim() === "true") {
+		throw new Error(`Bare git repositories are not supported: ${cwd}`);
 	}
 
-	return worktrees;
+	const branch = await pi.exec("git", ["symbolic-ref", "--short", "-q", "HEAD"], {
+		cwd,
+		signal,
+		timeout: 5000,
+	});
+
+	return { branch: branch.code === 0 ? branch.stdout.trim() || undefined : undefined };
 }
