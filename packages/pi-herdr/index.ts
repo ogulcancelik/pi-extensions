@@ -493,7 +493,7 @@ export default function (pi: ExtensionAPI) {
 					description: "Keys to send, space-separated (for send action). Examples: C-c, Enter, q, y",
 				}),
 			),
-			cwd: Type.Optional(Type.String({ description: "Working directory for workspace/tab create where supported" })),
+			cwd: Type.Optional(Type.String({ description: "Working directory for workspace_create, tab_create, and pane_split where supported" })),
 			focus: Type.Optional(Type.Boolean({ description: "Explicitly change focus for create/focus actions. Defaults should preserve current focus." })),
 		}),
 
