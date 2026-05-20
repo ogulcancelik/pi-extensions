@@ -15,15 +15,17 @@ Configure which models are available for sparring by editing `~/.pi/agent/spar/c
 ```json
 {
   "models": [
-    { "alias": "opus", "provider": "anthropic", "id": "claude-opus-4.7", "when": "best for deep reasoning" },
-    { "alias": "minimax", "provider": "minimax", "id": "minimax-m2.7", "when": "great ui/ux eye, weaker on code" }
+    { "alias": "opus", "provider": "anthropic", "id": "claude-opus-4.7", "thinking": "xhigh", "when": "best for deep reasoning" },
+    { "alias": "minimax", "provider": "minimax", "id": "minimax-m2.7", "thinking": "low", "when": "great ui/ux eye, weaker on code" }
   ]
 }
 ```
 
-Each entry needs `alias`, `provider`, and `id`. The optional `when` field is shown in the tool description to help the agent pick the right model for the task.
+Each entry needs `alias`, `provider`, and `id`. The optional `thinking` field sets the model's default thinking level for new spar sessions. If omitted, spar uses `high`. A tool call can still pass an explicit `thinking` value to override the config. The optional `when` field is shown in the tool description to help the agent pick the right model for the task.
 
-> **Note:** Changes are picked up on the next `spar` tool call — no restart needed. The `when` text is included in the live tool description the agent sees.
+Valid thinking values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+
+> **Note:** Changes are picked up on the next `spar` tool call — no restart needed. The `thinking` and `when` text are included in the live tool description the agent sees.
 
 ## Usage
 

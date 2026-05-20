@@ -24,6 +24,11 @@ const CONFIG_PATH = path.join(SPAR_DIR, "config.json");
 // Default timeout: 30 minutes (sliding - resets on activity)
 export const DEFAULT_TIMEOUT = 1800000;
 
+// Default thinking level for peer agents. Per-model config and explicit tool args override this.
+export const DEFAULT_THINKING = "high";
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export type SparThinkingLevel = (typeof THINKING_LEVELS)[number];
+
 // Default tools for peer agent (read-only)
 const DEFAULT_TOOLS = "read,grep,find,ls";
 
@@ -32,20 +37,48 @@ const DEFAULT_TOOLS = "read,grep,find,ls";
 // =============================================================================
 
 export interface SparModelConfig {
-	alias: string;     // short name like "gpt5", "opus"
-	provider: string;  // pi provider like "openai", "anthropic"
-	id: string;        // model id like "gpt-5.4", "claude-opus-4-6"
-	when?: string;     // optional guidance: when to use this model
+	alias: string;              // short name like "gpt5", "opus"
+	provider: string;           // pi provider like "openai", "anthropic"
+	id: string;                 // model id like "gpt-5.4", "claude-opus-4-6"
+	thinking?: SparThinkingLevel; // optional per-model thinking level
+	when?: string;              // optional guidance: when to use this model
 }
 
 export interface SparConfig {
 	models: SparModelConfig[];
 }
 
+function isThinkingLevel(value: unknown): value is SparThinkingLevel {
+	return typeof value === "string" && THINKING_LEVELS.includes(value as SparThinkingLevel);
+}
+
+function normalizeSparConfig(value: unknown): SparConfig {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return { models: [] };
+	const input = value as { models?: unknown };
+	if (!Array.isArray(input.models)) return { models: [] };
+
+	const models: SparModelConfig[] = [];
+	for (const model of input.models) {
+		if (!model || typeof model !== "object" || Array.isArray(model)) continue;
+		const raw = model as Record<string, unknown>;
+		if (typeof raw.alias !== "string" || typeof raw.provider !== "string" || typeof raw.id !== "string") continue;
+
+		models.push({
+			alias: raw.alias,
+			provider: raw.provider,
+			id: raw.id,
+			...(isThinkingLevel(raw.thinking) ? { thinking: raw.thinking } : {}),
+			...(typeof raw.when === "string" ? { when: raw.when } : {}),
+		});
+	}
+
+	return { models };
+}
+
 export function loadSparConfig(): SparConfig {
 	try {
 		if (fs.existsSync(CONFIG_PATH)) {
-			return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+			return normalizeSparConfig(JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8")));
 		}
 	} catch {}
 	return { models: [] };
@@ -75,6 +108,7 @@ export function getConfiguredModelsDescription(): string {
 	return config.models
 		.map(m => {
 			let line = `- \`${m.alias}\` — ${m.provider}/${m.id}`;
+			if (m.thinking) line += ` — thinking: ${m.thinking}`;
 			if (m.when) line += ` — ${m.when}`;
 			return line;
 		})
@@ -495,9 +529,11 @@ function countSessionMessages(sessionFile: string): number {
  * Resolve model alias or provider:model string to components.
  * Accepts: "opus", "gpt5" (configured aliases), or "provider:model" directly.
  */
-export function resolveModel(model: string): { provider: string; modelId: string; fullModel: string } {
+export function resolveModel(model: string): { provider: string; modelId: string; fullModel: string; thinking?: SparThinkingLevel } {
+	const config = loadSparConfig();
 	const aliases = getModelAliases();
 	const fullModel = aliases[model] || model;
+	const configuredModel = config.models.find(m => m.alias === model || `${m.provider}:${m.id}` === fullModel);
 	const parts = fullModel.split(":");
 	if (parts.length < 2) {
 		const available = Object.keys(aliases);
@@ -510,6 +546,7 @@ export function resolveModel(model: string): { provider: string; modelId: string
 		provider: parts[0],
 		modelId: parts.slice(1).join(":"),
 		fullModel,
+		thinking: configuredModel?.thinking,
 	};
 }
 
@@ -656,14 +693,14 @@ export function createSession(name: string, model: string, thinking?: string): S
 		throw new Error(`Session "${name}" already exists.`);
 	}
 
-	const { provider, modelId, fullModel } = resolveModel(model);
+	const { provider, modelId, fullModel, thinking: configuredThinking } = resolveModel(model);
 	
 	const info: SessionInfo = {
 		id: name,
 		model: fullModel,
 		provider,
 		modelId,
-		thinking,
+		thinking: thinking ?? configuredThinking ?? DEFAULT_THINKING,
 		tools: DEFAULT_TOOLS,
 		sessionFile: getSessionFilePath(name),
 		createdAt: Date.now(),

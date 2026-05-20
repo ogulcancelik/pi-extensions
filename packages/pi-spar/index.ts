@@ -17,6 +17,7 @@ import {
 	getConfiguredModelsDescription,
 	deleteSession,
 	DEFAULT_TIMEOUT,
+	DEFAULT_THINKING,
 } from "./core.js";
 import {
 	SparPeekOverlay,
@@ -39,9 +40,11 @@ export default function (pi: ExtensionAPI) {
 		get description() {
 			return `Spar with another AI model — a conversation, not a lookup.
 
-Use only when the user asks, or when you have a clear user-visible reason.
+Use this only when the user explicitly asks you to spar, or when you are blocked and cannot move forward without another model's opinion.
 
-Prefer a different model family when possible.
+Do not use this for routine review, simple confirmation, or because a second opinion would merely be nice to have. This should be uncommon.
+
+When you do use it, prefer a different model family when possible.
 
 **Peer limitations:** read files, grep, find, and ls only. No bash, web, network, or file writes.
 
@@ -74,8 +77,8 @@ ${getConfiguredModelsDescription()}
 			model: Type.Optional(Type.String({
 				description: "Model alias (from config) or provider:model. Required for first message in a session.",
 			})),
-			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high"] as const, {
-				description: "Thinking level (default: high)",
+			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, {
+				description: `Thinking level. Explicit value overrides model config; default is ${DEFAULT_THINKING}.`,
 			})),
 			timeout: Type.Optional(Type.Number({
 				description: `Timeout in ms (default: ${DEFAULT_TIMEOUT / 60000} min). Resets on activity.`,
@@ -209,7 +212,7 @@ ${getConfiguredModelsDescription()}
 				try {
 					const result = await sendMessage(session, message, {
 						model,
-						thinking: thinking ?? "high",
+						thinking,
 						timeout: timeout ?? DEFAULT_TIMEOUT,
 						signal,
 						onProgress: (progress) => {

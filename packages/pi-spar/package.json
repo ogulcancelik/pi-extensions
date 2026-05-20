@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-spar",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Agent-to-agent sparring for pi. Back-and-forth conversations with peer AI models for debugging, design review, and challenging your thinking.",
   "type": "module",
   "keywords": [
