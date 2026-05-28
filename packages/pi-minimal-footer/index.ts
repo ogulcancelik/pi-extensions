@@ -4,7 +4,7 @@
  * Custom footer with context gauge + subscription usage bars.
  * Auto-detects provider from current model and shows relevant usage.
  *
- * Supports: Claude Max, Codex, Copilot, Gemini
+ * Supports: Claude Max, Codex, Copilot, Gemini, OpenCode Go
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -694,12 +694,104 @@ async function fetchKimiUsage(): Promise<UsageSnapshot> {
   }
 }
 
+// ============ OpenCode Go Auth ============
+
+function getOpencodeGoConfig(): { workspaceId: string; authCookie: string } | undefined {
+  const workspaceId = process.env.OPENCODE_GO_WORKSPACE_ID;
+  const authCookie = process.env.OPENCODE_GO_AUTH_COOKIE;
+  if (workspaceId && authCookie) {
+    return { workspaceId, authCookie };
+  }
+
+  const configPaths = [
+    join(homedir(), ".pi", "agent", "opencode-go.json"),
+    join(homedir(), ".config", "opencode", "opencode-go-usage.json"),
+    join(homedir(), ".opencode", "opencode-go-usage.json"),
+  ];
+
+  for (const configPath of configPaths) {
+    try {
+      if (existsSync(configPath)) {
+        const data = JSON.parse(readFileSync(configPath, "utf-8"));
+        if (data.workspaceId && data.authCookie) {
+          return { workspaceId: data.workspaceId, authCookie: data.authCookie };
+        }
+      }
+    } catch {}
+  }
+  return undefined;
+}
+
+async function fetchOpencodeGoUsage(): Promise<UsageSnapshot> {
+  const config = getOpencodeGoConfig();
+  if (!config) {
+    return { provider: "OpenCode Go", windows: [], error: "no-auth", fetchedAt: Date.now() };
+  }
+
+  const providerLabel = "OpenCode Go";
+
+  try {
+    const res = await fetchWithTimeout(
+      `https://opencode.ai/workspace/${config.workspaceId}/go`,
+      {
+        method: "GET",
+        headers: {
+          Cookie: `auth=${config.authCookie}`,
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0",
+        },
+      },
+      10000,
+    );
+
+    if (!res.ok) {
+      return { provider: providerLabel, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+    }
+
+    if (!res.url.includes(`/workspace/${config.workspaceId}/go`)) {
+      return { provider: providerLabel, windows: [], error: "session-expired", fetchedAt: Date.now() };
+    }
+
+    const html = await res.text();
+    const windows: RateWindow[] = [];
+
+    const rollingMatch = html.match(/rollingUsage:\$R\[\d+\]={status:"ok",resetInSec:(\d+),usagePercent:(\d+)/);
+    const weeklyMatch = html.match(/weeklyUsage:\$R\[\d+\]={status:"ok",resetInSec:(\d+),usagePercent:(\d+)/);
+    const monthlyMatch = html.match(/monthlyUsage:\$R\[\d+\]={status:"ok",resetInSec:(\d+),usagePercent:(\d+)/);
+
+    if (rollingMatch) {
+      const usedPercent = clampPercent(parseFloat(rollingMatch[2]));
+      const resetInSec = parseInt(rollingMatch[1], 10);
+      const resetsIn = resetInSec > 0 ? formatResetTime(new Date(Date.now() + resetInSec * 1000)) : undefined;
+      windows.push({ label: "5h", usedPercent, resetsIn });
+    }
+
+    if (weeklyMatch) {
+      const usedPercent = clampPercent(parseFloat(weeklyMatch[2]));
+      const resetInSec = parseInt(weeklyMatch[1], 10);
+      const resetsIn = resetInSec > 0 ? formatResetTime(new Date(Date.now() + resetInSec * 1000)) : undefined;
+      windows.push({ label: "Week", usedPercent, resetsIn });
+    }
+
+    if (monthlyMatch) {
+      const usedPercent = clampPercent(parseFloat(monthlyMatch[2]));
+      const resetInSec = parseInt(monthlyMatch[1], 10);
+      const resetsIn = resetInSec > 0 ? formatResetTime(new Date(Date.now() + resetInSec * 1000)) : undefined;
+      windows.push({ label: "Month", usedPercent, resetsIn });
+    }
+
+    return { provider: providerLabel, windows, fetchedAt: Date.now() };
+  } catch (e) {
+    return { provider: providerLabel, windows: [], error: String(e), fetchedAt: Date.now() };
+  }
+}
+
 // ============ Provider Detection ============
 
 // Map pi provider names to our internal usage provider keys
 const PROVIDER_MAP: Record<string, string> = {
   anthropic: "claude", // Claude Max subscription
   "openai-codex": "codex", // Codex subscription
+  "opencode-go": "opencode-go",
   "github-copilot": "copilot", // Copilot subscription
   "google-gemini-cli": "gemini", // Gemini CLI subscription
   minimax: "minimax", // MiniMax Token Plan / Coding Plan
@@ -717,6 +809,8 @@ async function fetchUsageForProvider(provider: string): Promise<UsageSnapshot> {
       return fetchClaudeUsage();
     case "codex":
       return fetchCodexUsage();
+    case "opencode-go":
+      return fetchOpencodeGoUsage();
     case "copilot":
       return fetchCopilotUsage();
     case "gemini":

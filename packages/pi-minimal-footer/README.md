@@ -24,6 +24,7 @@ Minimal footer for [pi](https://github.com/earendil-works/pi) that replaces the 
 | MiniMax        | 5h + weekly rolling windows (Token Plan / Coding Plan) |
 | MiniMax CN     | Same as MiniMax, China endpoint                        |
 | Kimi Coding    | 5h + weekly rolling windows (Plan)                     |
+| OpenCode Go    | 5h + weekly + monthly rolling windows                  |
 
 ## Install
 
@@ -39,6 +40,8 @@ Environment variables (all optional):
 | ------------------------------- | -------------------------------------------------------- | ------- |
 | `PI_MINIMAL_FOOTER_SHOW_CWD`    | Show current working directory in footer status line     | `1`     |
 | `PI_MINIMAL_FOOTER_SHOW_BRANCH` | Show git branch/dirty/ahead/behind in footer status line | `1`     |
+| `OPENCODE_GO_WORKSPACE_ID`      | OpenCode Go workspace ID (alternative to config file)    | —       |
+| `OPENCODE_GO_AUTH_COOKIE`       | OpenCode Go auth cookie (alternative to config file)     | —       |
 
 Accepted false values: `0`, `false`, `no`, `off` (case-insensitive).
 
@@ -71,3 +74,4 @@ Anthropic's OAuth usage endpoint (`/api/oauth/usage`) has been returning persist
 - Replaces the default pi footer entirely via `ctx.ui.setFooter()`
 - Auth tokens are read from `~/.pi/agent/auth.json` (populated by `/login`) or standard env vars (`ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`, etc.)
 - Providers without auth simply don't show a usage bar — no errors
+- OpenCode Go credentials are resolved from environment variables first, then from `~/.pi/agent/opencode-go.json`, `~/.config/opencode/opencode-go-usage.json`, or `~/.opencode/opencode-go-usage.json`
