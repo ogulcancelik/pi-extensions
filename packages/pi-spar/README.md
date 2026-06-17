@@ -22,9 +22,9 @@ Configure which models are available for sparring by editing `~/.pi/agent/spar/c
 }
 ```
 
-Each entry needs `alias`, `provider`, and `id`. The optional `thinking` field sets the model's default thinking level for new spar sessions. If omitted, spar uses `high`. A tool call can still pass an explicit `thinking` value to override the config. The optional `tools` field sets the peer's tool list for new sessions; default is `read,grep,find,ls`. The optional `skills` field attaches skill names or paths to new sessions. The optional `when` field is shown in the tool description to help the agent pick the right model for the task.
+Each entry needs `alias`, `provider`, and `id`. The optional `thinking` field sets the model's default thinking level for new spar sessions. If omitted, spar uses `high`. A tool call can still pass an explicit `thinking` value to override the config. The optional `tools` field sets the peer's tool list for new sessions; default is `read,bash,grep,find,ls`. The optional `skills` field attaches skill names or paths to new sessions. The optional `when` field is shown in the tool description to help the agent pick the right model for the task.
 
-Valid thinking values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Skills are instructions, not tools; include `bash` in `tools` when a skill needs shell commands.
+Valid thinking values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Skills are instructions, not tools; include `bash` if you override `tools` for a skill that needs shell commands.
 
 > **Note:** Changes are picked up on the next `spar` tool call — no restart needed. The configured thinking, tools, skills, and `when` text are included in the live tool description the agent sees.
 
@@ -41,7 +41,7 @@ The agent uses this when you ask it to consult another model:
 "ask opus to review the error handling in src/auth.ts"
 ```
 
-Sessions persist — follow up, push back, disagree. The peer uses read-only tools by default, and the agent can explicitly choose broader tools or skills when creating a session. Existing sessions keep their original model, tools, and skills.
+Sessions persist — follow up, push back, disagree. The peer excludes mutating edit/write tools by default, and the agent can explicitly choose broader tools or skills when creating a session. Existing sessions keep their original model, tools, and skills.
 
 ### Commands
 

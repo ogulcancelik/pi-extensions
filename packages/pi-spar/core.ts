@@ -29,8 +29,8 @@ export const DEFAULT_THINKING = "high";
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type SparThinkingLevel = (typeof THINKING_LEVELS)[number];
 
-// Default tools for peer agent (read-only)
-export const DEFAULT_TOOLS = "read,grep,find,ls";
+// Default tools for peer agent. Excludes mutating edit/write tools.
+export const DEFAULT_TOOLS = "read,bash,grep,find,ls";
 
 // =============================================================================
 // Spar Config — user-configured models via /spar-models
@@ -41,7 +41,7 @@ export interface SparModelConfig {
 	provider: string;           // pi provider like "openai", "anthropic"
 	id: string;                 // model id like "gpt-5.4", "claude-opus-4-6"
 	thinking?: SparThinkingLevel; // optional per-model thinking level
-	tools?: string;             // optional pi tool list for new sessions; defaults to read-only
+	tools?: string;             // optional pi tool list for new sessions; defaults to DEFAULT_TOOLS
 	skills?: string[];           // optional skill names/paths for new sessions
 	when?: string;              // optional guidance: when to use this model
 }
@@ -138,6 +138,7 @@ export interface SessionInfo {
 	tools: string;
 	skills?: string[];
 	skillPaths?: string[];
+	cwd?: string;
 	sessionFile: string;
 	createdAt: number;
 	lastActivity?: number;
@@ -194,6 +195,33 @@ function getSessionFilePath(sessionId: string): string {
 
 function getSessionLogPath(sessionId: string): string {
 	return path.join(SESSION_DIR, `${sessionId}.log`);
+}
+
+function normalizeCwd(cwd: string | undefined): string {
+	return path.resolve(cwd ?? process.cwd());
+}
+
+function readSessionHeaderCwd(sessionFile: string): string | undefined {
+	try {
+		if (!fs.existsSync(sessionFile)) return undefined;
+		const fd = fs.openSync(sessionFile, "r");
+		try {
+			const buffer = Buffer.alloc(8192);
+			const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+			const firstLine = buffer.subarray(0, bytesRead).toString("utf-8").split("\n", 1)[0];
+			if (!firstLine.trim()) return undefined;
+			const header = JSON.parse(firstLine) as { cwd?: unknown };
+			return typeof header.cwd === "string" && header.cwd.trim() ? normalizeCwd(header.cwd) : undefined;
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return undefined;
+	}
+}
+
+function getSessionCwd(info: SessionInfo, fallback?: string): string {
+	return info.cwd ?? readSessionHeaderCwd(info.sessionFile) ?? normalizeCwd(fallback);
 }
 
 export interface PeekMarker {
@@ -805,6 +833,7 @@ export function createSession(name: string, model: string, thinking?: string, to
 	} = resolveModel(model);
 	const effectiveSkills = normalizeSkills(skills ?? configuredSkills);
 	
+	const sessionCwd = normalizeCwd(cwd);
 	const info: SessionInfo = {
 		id: name,
 		model: fullModel,
@@ -813,7 +842,8 @@ export function createSession(name: string, model: string, thinking?: string, to
 		thinking: thinking ?? configuredThinking ?? DEFAULT_THINKING,
 		tools: normalizeTools(tools ?? configuredTools),
 		skills: effectiveSkills,
-		skillPaths: resolveSkillPaths(effectiveSkills, cwd),
+		skillPaths: resolveSkillPaths(effectiveSkills, sessionCwd),
+		cwd: sessionCwd,
 		sessionFile: getSessionFilePath(name),
 		createdAt: Date.now(),
 		messageCount: 0,
@@ -883,8 +913,12 @@ export async function sendMessage(
 		}
 	}
 
+	if (!info.cwd) {
+		info.cwd = getSessionCwd(info, options.cwd);
+	}
+
 	if (info.skills?.length && !info.skillPaths?.length) {
-		info.skillPaths = resolveSkillPaths(info.skills, options.cwd ?? process.cwd());
+		info.skillPaths = resolveSkillPaths(info.skills, info.cwd);
 	}
 
 	const timeout = options.timeout ?? DEFAULT_TIMEOUT;
@@ -925,8 +959,11 @@ async function sendToAgent(
 	const piBin = process.env.PI_SPAR_PI_BIN || "pi";
 	
 	const logger = new SessionLogger(info.id);
+	const spawnCwd = info.cwd ?? normalizeCwd(undefined);
+
 	logger.info("session", "Starting sendToAgent", { 
-		model: info.model, 
+		model: info.model,
+		cwd: spawnCwd,
 		timeout, 
 		messageLength: message.length,
 		messagePreview: message.slice(0, 200) + (message.length > 200 ? "..." : ""),
@@ -966,9 +1003,10 @@ async function sendToAgent(
 		args.push("--skill", skillPath);
 	}
 
-	logger.info("spawn", "Spawning pi process", { bin: piBin, args });
+	logger.info("spawn", "Spawning pi process", { bin: piBin, args, cwd: spawnCwd });
 
 	const proc = spawn(piBin, args, {
+		cwd: spawnCwd,
 		stdio: ["pipe", "pipe", "pipe"],
 		env: { ...process.env },
 	});

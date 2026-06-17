@@ -47,9 +47,9 @@ Do not use this for routine review, simple confirmation, or because a second opi
 
 When you do use it, prefer a different model family when possible.
 
-**Default peer capabilities:** tools are \`${DEFAULT_TOOLS}\` unless you explicitly choose tools when creating a session. Bash, edit, and write are optional and must be requested deliberately.
+**Default peer capabilities:** tools are \`${DEFAULT_TOOLS}\` unless you explicitly choose tools when creating a session. Edit and write are optional and must be requested deliberately.
 
-**Skills:** optional skills can be attached when creating a session. Skills are instructions, not tools. If a skill needs shell commands, include \`bash\` in tools.
+**Skills:** optional skills can be attached when creating a session. Skills are instructions, not tools. If you override tools for a skill that needs shell commands, include \`bash\`.
 
 **Important:**
 - if they raise a point you hadn't considered, dig into it. If you disagree, counter it. Don't take the first response and run.
@@ -86,10 +86,10 @@ For existing sessions, model, tools, and skills are fixed. Use a new session nam
 				description: `Thinking level. Explicit value overrides model config; default is ${DEFAULT_THINKING}.`,
 			})),
 			tools: Type.Optional(Type.String({
-				description: `Comma-separated tools for a new session. Default: ${DEFAULT_TOOLS}. Add bash/edit/write only when needed. Fixed after session creation.`,
+				description: `Comma-separated tools for a new session. Default: ${DEFAULT_TOOLS}. Add edit/write only when needed. Fixed after session creation.`,
 			})),
 			skills: Type.Optional(Type.Array(Type.String(), {
-				description: "Skill names or paths for a new session. Skills are instructions; include bash in tools for command-backed skills.",
+				description: "Skill names or paths for a new session. Skills are instructions; include bash if you override tools for command-backed skills.",
 			})),
 			timeout: Type.Optional(Type.Number({
 				description: `Timeout in ms (default: ${DEFAULT_TIMEOUT / 60000} min). Resets on activity.`,
