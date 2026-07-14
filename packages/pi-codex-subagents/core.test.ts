@@ -6,6 +6,7 @@ mock.module("@earendil-works/pi-coding-agent", () => ({
 }));
 
 const {
+  AgentManager,
   RpcJsonlDecoder,
   consumeFirstMatchingMailboxEvent,
   parentScopeKey,
@@ -54,6 +55,14 @@ Review the requested files.`, "fallback");
 });
 
 describe("completion mailbox", () => {
+  test("waits until explicitly cancelled when no completion exists", async () => {
+    const manager = new AgentManager();
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error("cancelled")), 10);
+    await expect(manager.waitAgent("empty-parent", undefined, controller.signal)).rejects.toThrow("cancelled");
+    await manager.shutdown();
+  });
+
   test("consumes one matching completion without dropping siblings", () => {
     const events = [
       { id: "1", parentSessionId: "parent", agentName: "/one", status: "completed", createdAt: 1 },

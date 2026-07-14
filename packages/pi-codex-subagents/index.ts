@@ -9,7 +9,6 @@ import { Type } from "typebox";
 import { Text, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import {
   AgentManager,
-  DEFAULT_TIMEOUT_MS,
   getAgentDefinitionsDescription,
   type AgentInfo,
   type ThinkingLevel,
@@ -150,12 +149,11 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     description: "Wait for one session-owned agent completion, or for the next completion if targets is omitted. Returns one final response. Use wait_all_agents when every target must finish.",
     parameters: Type.Object({
       targets: Type.Optional(Type.Array(Type.String(), { description: "Agent task names to wait on. Omit to wait for the next completion in this parent session." })),
-      timeout_ms: Type.Optional(Type.Number({ description: `Timeout in milliseconds. Default ${DEFAULT_TIMEOUT_MS}.` })),
     }),
     async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
       try {
-        const result = await manager.waitAgent(parentSessionId(ctx), parseTargets(params.targets), params.timeout_ms ?? DEFAULT_TIMEOUT_MS, signal);
-        return boundedTextResult(JSON.stringify(result, null, 2), { message: result.message, timed_out: result.timed_out });
+        const result = await manager.waitAgent(parentSessionId(ctx), parseTargets(params.targets), signal);
+        return boundedTextResult(JSON.stringify(result, null, 2), { message: result.message });
       } catch (error) {
         if (signal?.aborted) throw error;
         throw new Error(`wait_agent failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -167,22 +165,21 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     },
     renderResult(result: any, _options: any, theme: Theme) {
       if (result.isError) return new Text(theme.fg("error", "✗ wait failed"), 0, 0);
-      return new Text(theme.fg(result.details?.timed_out ? "warning" : "success", result.details?.message || "done"), 0, 0);
+      return new Text(theme.fg("success", result.details?.message || "done"), 0, 0);
     },
   });
 
   pi.registerTool({
     name: "wait_all_agents",
     label: "Wait All Agents",
-    description: "Wait until all targeted session-owned agents reach a final status, or until timeout. Returns their final text responses.",
+    description: "Wait until all targeted session-owned agents reach a final status. Returns their final text responses.",
     parameters: Type.Object({
       targets: Type.Optional(Type.Array(Type.String(), { description: "Agent task names to wait for. Omit to wait for agents spawned by this extension instance." })),
-      timeout_ms: Type.Optional(Type.Number({ description: `Timeout in milliseconds. Default ${DEFAULT_TIMEOUT_MS}.` })),
     }),
     async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
       try {
-        const result = await manager.waitAllAgents(parentSessionId(ctx), parseTargets(params.targets), params.timeout_ms ?? DEFAULT_TIMEOUT_MS, signal);
-        return boundedTextResult(JSON.stringify(result, null, 2), { message: result.message, timed_out: result.timed_out, pending: result.pending });
+        const result = await manager.waitAllAgents(parentSessionId(ctx), parseTargets(params.targets), signal);
+        return boundedTextResult(JSON.stringify(result, null, 2), { message: result.message });
       } catch (error) {
         if (signal?.aborted) throw error;
         throw new Error(`wait_all_agents failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -194,8 +191,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     },
     renderResult(result: any, _options: any, theme: Theme) {
       if (result.isError) return new Text(theme.fg("error", "✗ wait failed"), 0, 0);
-      const pending = result.details?.pending?.length ? ` (${result.details.pending.length} pending)` : "";
-      return new Text(theme.fg(result.details?.timed_out ? "warning" : "success", `${result.details?.message || "done"}${pending}`), 0, 0);
+      return new Text(theme.fg("success", result.details?.message || "done"), 0, 0);
     },
   });
 

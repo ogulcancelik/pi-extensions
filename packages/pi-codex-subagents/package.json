@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-codex-subagents",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Codex-shaped, session-scoped subagents for Pi with templates, waits, steering, and a live overlay.",
   "type": "module",
   "keywords": [
