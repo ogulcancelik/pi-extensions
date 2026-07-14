@@ -1,6 +1,6 @@
 # pi-herdr
 
-Herdr-native pane, tab, and workspace orchestration for [pi](https://github.com/earendil-works/pi). Run commands in existing panes, read output, wait for readiness, coordinate with other agents, and organize work across tabs and workspaces without falling back to tmux choreography.
+Herdr-native orchestration for [pi](https://github.com/earendil-works/pi). The package combines a structured `herdr` tool for common operations with Herdr's current agent skill for the complete installed CLI.
 
 ## Install
 
@@ -8,7 +8,7 @@ Herdr-native pane, tab, and workspace orchestration for [pi](https://github.com/
 pi install npm:@ogulcancelik/pi-herdr
 ```
 
-Or add manually to `~/.pi/agent/settings.json`:
+Or add it to `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -16,186 +16,139 @@ Or add manually to `~/.pi/agent/settings.json`:
 }
 ```
 
-## What it does
+The extension and skill activate only inside a Herdr-managed pane with `HERDR_ENV=1` and `HERDR_PANE_ID` set.
 
-Gives the agent a `herdr` tool with these actions:
+## Invocation policy
+
+Herdr is opt-in. The agent uses this package only when the user explicitly mentions Herdr or asks to inspect or control Herdr panes, tabs, workspaces, commands, or agents. Installing the package does not turn every background command or delegation opportunity into a Herdr workflow.
+
+When Herdr is requested, the default topology is a sibling pane in the caller's current tab and cwd. Focus remains with the user unless `focus: true` is explicitly requested. Another tab, workspace, worktree, or cwd is used only when requested.
+
+## Structured tool
+
+The `herdr` tool covers the common safe orchestration surface:
 
 | Action | Description |
-|--------|-------------|
-| **list** | List panes in the current herdr workspace |
-| **workspace_list** | List workspaces |
-| **workspace_create** | Create a workspace |
-| **workspace_focus** | Focus a workspace |
-| **tab_list** | List tabs in a workspace |
-| **tab_create** | Create a tab |
-| **tab_focus** | Focus a tab |
-| **focus** | Focus a workspace, tab, or the tab containing a pane |
-| **pane_split** | Split an existing pane and optionally alias the new pane |
-| **run** | Submit a line atomically with Enter in an existing pane |
-| **read** | Read output from a pane |
-| **watch** | Wait until pane output matches text or regex |
-| **wait_agent** | Wait until one or more panes running recognized coding agents reach one or more target statuses |
-| **send** | Send raw text or keys to a pane without implicit Enter |
-| **stop** | Close a pane |
+|---|---|
+| `list` | List panes in the caller's workspace |
+| `current` | Show the caller-owned pane, independent of UI focus |
+| `workspace_list` | List workspaces |
+| `workspace_create` | Create a workspace and optionally alias its root pane |
+| `workspace_focus` | Focus a workspace |
+| `tab_list` | List tabs |
+| `tab_create` | Create a tab and optionally alias its root pane |
+| `tab_focus` | Focus a tab |
+| `focus` | Focus a workspace, tab, or exact pane target |
+| `pane_rename` | Set a visible pane label |
+| `pane_split` | Split a pane and optionally alias and label the result |
+| `agent_list` | List detected and reported agents |
+| `agent_get` | Inspect an agent by name, terminal id, pane id, or alias |
+| `run` | Submit text and Enter atomically in an existing pane |
+| `read` | Read pane output |
+| `watch` | Wait for output matching text or regex |
+| `wait_agent` | Wait for one or more recognized agents to reach accepted statuses |
+| `send` | Send literal text or keys without implicit Enter |
+| `stop` | Close a pane, never the pane running the current pi process |
 
-## Why this exists
+The tool intentionally does not mirror every Herdr command. The bundled `herdr` skill tells the agent to inspect the installed binary for less common operations such as worktrees, pane movement, resize, zoom, terminal attach, notifications, integrations, and session management. This keeps the typed tool focused while the installed Herdr CLI remains authoritative.
 
-This replaces the most common `pi-tmux` workflow with herdr's native CLI wrappers:
+## Current-pane and identity behavior
 
-- `herdr workspace ...`
-- `herdr tab ...`
-- `herdr pane split`
-- `herdr pane run`
-- `herdr pane read`
-- `herdr wait output`
-- `herdr wait agent-status`
-- `herdr pane close`
+Herdr now uses opaque public ids such as `w1`, `w1:t1`, `w1:p1`, and `term_...`. Encoded suffixes may contain letters. The extension reads ids from Herdr responses and never constructs them.
 
-That means the agent can do higher-level pane workflows with fewer brittle steps and better awareness of agent completion states like `done`.
+`current` uses `herdr pane current --current`, so it resolves the pane that launched pi rather than whichever pane another client currently focuses. Pane aliases are stored in tool-result details and reconstructed when a pi session loads or changes branches.
 
-## Defaults and behavior
+`pane_split` defaults to the caller's pane. If `direction` is omitted, the tool reads the source pane layout and chooses `right` for a sufficiently wide pane or `down` for a narrow or tall pane. Creation and split actions preserve UI focus unless `focus: true` is passed.
 
-- The extension returns early unless `HERDR_ENV` exists and `HERDR_PANE_ID` is present, so the `herdr` tool is not registered at all outside herdr
-- Pane actions target pane identity. Use friendly aliases like `server` or `tests`, or real herdr pane ids from create/list results
-- Alias state is stored in tool result details and reconstructed on session load and branch changes
-- The extension preserves current focus by default. Creation flows stay in the current UI context unless `focus: true` is passed explicitly.
-- `pane_split` creates a right sibling pane from the agent's own pane by default, or from an explicit pane alias/id in the current workspace, and can remember it under `newPane`
-- `workspace_create` and `tab_create` use herdr's returned `root_pane` when available, with a pane-list fallback for older herdr versions
-- `run` only targets an existing pane alias or real pane id
-- If an alias no longer points to a live pane, the extension removes it and returns an error
-- `watch` uses `herdr wait output` and is the right wait primitive for normal processes like tests, dev servers, and build logs
-- `wait_agent` uses herdr agent status information and can coordinate one pane or many panes that are running recognized coding agents
-- `watch` and `wait_agent` forward pi's abort signal, so Escape cancels the wait
-- `read` and `watch` support `visible`, `recent`, and `recent-unwrapped`
+## Reading and waiting
 
-## Agent status semantics
+Read sources are:
 
-Use `wait_agent` only for panes running a recognized coding agent. Do not use it to wait for normal shell commands, test runners, build processes, or dev servers. Use `watch` for output conditions and `read` for inspection.
+- `visible`: rendered viewport
+- `recent`: recent rendered scrollback, including soft wraps
+- `recent-unwrapped`: recent scrollback with soft wraps joined; preferred for logs and transcripts
+- `detection`: bottom-buffer evidence used by agent detection; valid for `read`, not `watch`
 
-When using `wait_agent`, herdr statuses mean:
+Use `watch` for servers, tests, builds, and other ordinary commands. Use `wait_agent` only for panes containing recognized coding agents.
 
-- `working` — the agent is actively processing
-- `blocked` — the agent needs user input or approval
-- `done` — the agent finished in a background pane and you have not looked at it yet
-- `idle` — the agent finished and the pane has already been seen
-- `unknown` — no recognized agent is detected
+Agent statuses are:
 
-Important workflow tips:
+- `working`: actively processing
+- `blocked`: waiting for user input or approval
+- `done`: completed and unseen
+- `idle`: completed or waiting and considered seen
+- `unknown`: no recognized agent state
 
-- if you start another agent in a background pane and want to wait for completion, **usually wait for `done`**
-- if the pane is focused while the agent finishes, expect **`idle`** instead
-- do **not** treat `blocked` as generic startup readiness
+Treat both `idle` and `done` as completed when inspecting an agent. Which one appears depends on tab visibility, client focus, and whether the completed result has been seen.
 
-## Starting another pi cleanly
+## Examples
 
-A good pattern for a fresh agent in another pane is to create a tab or workspace root pane, or split an existing pane, alias it, then run in that existing pane:
-
-```json
-{ "action": "tab_create", "label": "review", "pane": "reviewer" }
-```
-
-```json
-{ "action": "run", "pane": "reviewer", "command": "pi --no-session --model openai-codex/gpt-5.4-mini" }
-```
-
-If model choice matters and the user has not specified one, the agent should ask which model/provider to use.
-
-## Example workflows
-
-Split the agent's own pane to the right by default and remember the new sibling pane as `reviewer`:
+Create and label a sibling pane using geometry-aware direction selection:
 
 ```json
 { "action": "pane_split", "newPane": "reviewer" }
 ```
 
-Split an explicit existing pane instead:
+Start an interactive agent, wait for its initial prompt, then submit work atomically:
 
 ```json
-{ "action": "pane_split", "pane": "server", "direction": "right", "newPane": "reviewer" }
-```
-
-Create a tab and remember its root pane as `server`:
-
-```json
-{ "action": "tab_create", "label": "server", "pane": "server" }
-```
-
-Run a server in that existing pane:
-
-```json
-{ "action": "run", "pane": "server", "command": "bun run dev" }
-```
-
-Wait for readiness with regex:
-
-```json
-{ "action": "watch", "pane": "server", "match": "ready|listening on", "regex": true, "timeout": 30000 }
-```
-
-Read recent unwrapped logs:
-
-```json
-{ "action": "read", "pane": "server", "source": "recent-unwrapped", "lines": 40 }
-```
-
-Create a labeled tab and remember its returned root pane:
-
-```json
-{ "action": "tab_create", "workspace": "1", "label": "review", "pane": "reviewer" }
-```
-
-Run in that existing root pane:
-
-```json
-{ "action": "run", "pane": "reviewer", "command": "pi --no-session" }
-```
-
-Wait for another agent to finish in the same sense the UI shows:
-
-```json
-{ "action": "wait_agent", "pane": "reviewer", "status": "done", "timeout": 300000 }
-```
-
-Wait until a whole set of panes has settled into idle or done:
-
-```json
-{ "action": "wait_agent", "panes": ["pi-00f", "pi-010", "pi-016"], "statuses": ["idle", "done"], "mode": "all", "timeout": 300000 }
-```
-
-Focus the tab containing an existing pane id:
-
-```json
-{ "action": "focus", "pane": "w64eca6cb07ad62-2" }
-```
-
-List workspaces and tabs:
-
-```json
-{ "action": "workspace_list" }
+{ "action": "run", "pane": "reviewer", "command": "codex" }
 ```
 
 ```json
-{ "action": "tab_list", "workspace": "1" }
+{ "action": "wait_agent", "pane": "reviewer", "status": "idle", "timeout": 30000 }
 ```
 
-## Notes for agents
+```json
+{ "action": "run", "pane": "reviewer", "command": "Review the current diff and report actionable findings." }
+```
 
-- `pane_split`, `run`, `read`, `watch`, `wait_agent`, `send`, and `stop` target panes only. Do not pass tab ids to those actions.
-- `wait_agent` accepts either `pane`/`status` for single-pane waits or `panes`/`statuses` for multi-pane waits, but only for panes running recognized coding agents. Use `mode: "all"` or `mode: "any"` to control how multi-pane waits resolve.
-- `run` is the default way to submit a line or prompt to a pane because it sends text and Enter atomically.
-- `send` is low-level input only. It does not press Enter. If you want text plus Enter as one action, use `run` instead of `send` + `Enter`.
-- `run` only targets an existing pane. It never creates or restarts panes.
-- If an alias is stale, the extension removes it and returns an error.
-- `pane_split` accepts optional `pane`, `direction`, `newPane`, `cwd`, and `focus`, and returns the created pane. If `pane` is omitted, it splits the agent's own pane. If `direction` is omitted, it splits right.
-- `tab_create` and `workspace_create` accept `label` and preserve current focus unless `focus: true` is passed explicitly.
-- If you already know a real pane id from `list` or another herdr response, you can use it directly in `run`, `read`, `watch`, `wait_agent`, `send`, `stop`, or `focus`, even outside the alias map, as long as it belongs to the agent's current workspace.
-- Herdr does not currently expose direct pane focus. `focus` with a pane id focuses the pane's tab.
+Wait for completion whether the result is seen or unseen:
+
+```json
+{
+  "action": "wait_agent",
+  "pane": "reviewer",
+  "statuses": ["idle", "done"],
+  "mode": "any",
+  "timeout": 120000
+}
+```
+
+Read the resulting transcript:
+
+```json
+{ "action": "read", "pane": "reviewer", "source": "recent-unwrapped", "lines": 120 }
+```
+
+Wait for an ordinary process by output instead of agent status:
+
+```json
+{
+  "action": "watch",
+  "pane": "server",
+  "match": "ready|listening",
+  "regex": true,
+  "timeout": 30000
+}
+```
+
+## Package dependencies
+
+Pi-provided runtime modules are declared as peer dependencies and are not bundled:
+
+- `@earendil-works/pi-ai`
+- `@earendil-works/pi-coding-agent`
+- `@earendil-works/pi-tui`
+- `typebox`
+
+The extension imports schemas from `typebox`, matching current Pi package guidance.
 
 ## Requirements
 
-- [pi](https://github.com/earendil-works/pi) v0.40+
-- [herdr](https://github.com/ogulcancelik/herdr)
-- pi must be running inside a herdr pane
+- pi 0.80 or newer
+- Herdr 0.7.3 or newer
+- pi running inside a Herdr pane
 
 ## License
 

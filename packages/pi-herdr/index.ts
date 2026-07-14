@@ -2,10 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
-type ReadSource = "visible" | "recent" | "recent-unwrapped";
+type ReadSource = "visible" | "recent" | "recent-unwrapped" | "detection";
+type SplitDirection = "right" | "down";
 
 interface WorkspaceInfo {
 	workspace_id: string;
@@ -30,13 +31,49 @@ interface TabInfo {
 
 interface PaneInfo {
 	pane_id: string;
+	terminal_id?: string;
 	workspace_id: string;
 	tab_id: string;
 	focused: boolean;
 	cwd?: string;
+	foreground_cwd?: string;
+	label?: string;
 	agent?: string;
+	title?: string;
 	agent_status: AgentStatus;
 	revision: number;
+}
+
+interface AgentInfo {
+	terminal_id: string;
+	name?: string;
+	agent?: string;
+	display_agent?: string;
+	title?: string;
+	agent_status: AgentStatus;
+	workspace_id: string;
+	tab_id: string;
+	pane_id: string;
+	focused: boolean;
+	cwd?: string;
+	revision: number;
+}
+
+interface PaneLayoutRect {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+interface PaneLayoutSnapshot {
+	workspace_id: string;
+	tab_id: string;
+	zoomed: boolean;
+	focused_pane_id: string;
+	area: PaneLayoutRect;
+	panes: Array<{ pane_id: string; focused: boolean; rect: PaneLayoutRect }>;
+	splits: Array<{ id: string; direction: SplitDirection; ratio: number; rect: PaneLayoutRect }>;
 }
 
 interface PaneReadResult {
@@ -73,6 +110,7 @@ interface HerdrToolDetails {
 const ActionEnum = StringEnum(
 	[
 		"list",
+		"current",
 		"workspace_list",
 		"workspace_create",
 		"workspace_focus",
@@ -80,7 +118,10 @@ const ActionEnum = StringEnum(
 		"tab_create",
 		"tab_focus",
 		"focus",
+		"pane_rename",
 		"pane_split",
+		"agent_list",
+		"agent_get",
 		"run",
 		"read",
 		"watch",
@@ -95,12 +136,12 @@ const StatusEnum = StringEnum(["idle", "working", "blocked", "done", "unknown"] 
 	description: "Agent status to wait for",
 });
 
-const SourceEnum = StringEnum(["visible", "recent", "recent-unwrapped"] as const, {
-	description: "Read source for read/watch",
+const SourceEnum = StringEnum(["visible", "recent", "recent-unwrapped", "detection"] as const, {
+	description: "Read source for read/watch; detection is valid for read only",
 });
 
 const DirectionEnum = StringEnum(["right", "down"] as const, {
-	description: "Split direction for pane_split. Defaults to right.",
+	description: "Split direction for pane_split. When omitted, Herdr chooses from the source pane geometry.",
 });
 
 const WaitModeEnum = StringEnum(["all", "any"] as const, {
@@ -113,8 +154,6 @@ export default function (pi: ExtensionAPI) {
 	if (!herdrEnv || !currentPaneTargetEnv) {
 		return;
 	}
-	const currentPaneTarget = currentPaneTargetEnv;
-
 	const managedPanes = new Map<string, ManagedPane>();
 	const aliasOrder: string[] = [];
 
@@ -246,7 +285,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function getCurrentPaneInfo(signal?: AbortSignal): Promise<PaneInfo> {
-		const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(["pane", "get", currentPaneTarget], signal);
+		const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(["pane", "current", "--current"], signal);
 		return response.result.pane;
 	}
 
@@ -291,53 +330,57 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function resolveManagedPane(alias: string, workspaceId: string, signal?: AbortSignal): Promise<ManagedPane | null> {
-		const managed = managedPanes.get(alias);
-		if (!managed) return null;
-		if (managed.workspaceId !== workspaceId) return null;
+	async function getPaneLayout(paneId: string, signal?: AbortSignal): Promise<PaneLayoutSnapshot> {
+		const response = await execHerdrJson<{ result: { layout: PaneLayoutSnapshot } }>(
+			["pane", "layout", "--pane", paneId],
+			signal,
+		);
+		return response.result.layout;
+	}
 
-		const pane = await getPaneInfo(managed.paneId, signal);
-		if (!pane) {
-			forgetAlias(alias);
-			return null;
-		}
+	async function getAgentList(signal?: AbortSignal): Promise<AgentInfo[]> {
+		const response = await execHerdrJson<{ result: { agents: AgentInfo[] } }>(["agent", "list"], signal);
+		return response.result.agents || [];
+	}
 
-		return managed;
+	function chooseSplitDirection(layout: PaneLayoutSnapshot, paneId: string): SplitDirection {
+		const pane = layout.panes.find((candidate) => candidate.pane_id === paneId);
+		if (!pane) return "right";
+		return pane.rect.width >= 80 && pane.rect.width >= pane.rect.height * 2 ? "right" : "down";
 	}
 
 	async function resolvePaneRef(
 		ref: string,
-		workspaceId: string,
 		signal?: AbortSignal,
 	): Promise<{ pane: PaneInfo; alias?: string } | null> {
-		const managed = await resolveManagedPane(ref, workspaceId, signal);
+		const managed = managedPanes.get(ref);
 		if (managed) {
 			const pane = await getPaneInfo(managed.paneId, signal);
 			if (!pane) {
 				forgetAlias(ref);
 				return null;
 			}
+			managed.workspaceId = pane.workspace_id;
 			return { pane, alias: ref };
 		}
 
 		const pane = await getPaneInfo(ref, signal);
-		if (!pane || pane.workspace_id !== workspaceId) return null;
+		if (!pane) return null;
 		const alias = [...managedPanes.entries()].find(([, managedPane]) => managedPane.paneId === pane.pane_id)?.[0];
 		return { pane, alias };
 	}
 
 	async function requirePaneRef(
 		ref: string,
-		workspaceId: string,
 		signal?: AbortSignal,
 	): Promise<{ pane: PaneInfo; alias?: string }> {
 		const hadAlias = managedPanes.has(ref);
-		const resolved = await resolvePaneRef(ref, workspaceId, signal);
+		const resolved = await resolvePaneRef(ref, signal);
 		if (resolved) return resolved;
 		if (hadAlias) {
 			throw new Error(`Pane alias '${ref}' no longer points to a live pane and was removed.`);
 		}
-		throw new Error(`Pane '${ref}' not found in the current workspace.`);
+		throw new Error(`Pane '${ref}' not found.`);
 	}
 
 	async function readPane(
@@ -366,7 +409,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function summarizePane(pane: PaneInfo, alias?: string, currentPaneId?: string): string {
-		const name = alias || pane.pane_id;
+		const name = alias || pane.label || pane.pane_id;
 		const flags = [
 			pane.pane_id === currentPaneId || pane.focused ? "current" : null,
 			pane.agent ? pane.agent : null,
@@ -376,6 +419,17 @@ export default function (pi: ExtensionAPI) {
 			.join(", ");
 		const cwd = pane.cwd ? ` ${pane.cwd}` : "";
 		return `${name}: [${pane.pane_id}]${flags ? ` (${flags})` : ""}${cwd}`;
+	}
+
+	function agentDisplayName(agent: AgentInfo): string {
+		return agent.name || agent.display_agent || agent.agent || agent.pane_id;
+	}
+
+	function summarizeAgent(agent: AgentInfo): string {
+		const name = agentDisplayName(agent);
+		const flags = [agent.focused ? "focused" : null, agent.agent_status].filter(Boolean).join(", ");
+		const cwd = agent.cwd ? ` ${agent.cwd}` : "";
+		return `${name}: [${agent.pane_id}] (${flags})${cwd}`;
 	}
 
 	function summarizeTab(tab: TabInfo): string {
@@ -450,23 +504,20 @@ export default function (pi: ExtensionAPI) {
 		name: "herdr",
 		label: "herdr",
 		description:
-			"Herdr-native pane orchestration for long-running workflows. " +
-			"Actions: list panes, manage workspaces and tabs, split existing panes, submit lines atomically in existing panes, read output, watch readiness, wait for one or more agent panes to reach target statuses, send raw text or keys, focus contexts, and stop panes.",
+			"Structured access to Herdr's current workspace, tab, pane, and agent CLI. " +
+			"Lists and creates contexts, resolves caller-owned pane state, chooses splits from pane geometry, submits atomic input, reads output, waits for output or agent status, focuses targets, and closes panes.",
+		promptSnippet: "Inspect and control Herdr workspaces, tabs, panes, and agent terminals",
 		promptGuidelines: [
-			"Use `herdr` run for long-running processes in other panes instead of `bash`.",
-			"When you want to submit a line or prompt to a pane, prefer `run` over `send` + `Enter` so text and Enter happen atomically.",
-			"Use `send` only for low-level literal text or key injection when you do not want command-style submission semantics.",
-			"Preserve the current UI focus by default. Do not change workspace or tab focus unless the user explicitly asks or the workflow truly requires visible interaction there.",
-			"Pane actions like run, read, watch, wait_agent, send, and stop must target pane aliases or pane ids, not tab ids. For pane_split, omit pane to split the agent's own pane, or pass a pane alias/id to split that explicit source pane.",
-			"Use `herdr` workspace, tab, and pane_split actions to organize parallel work instead of piling everything into one pane stack.",
-			"Use `herdr` watch for normal command output, including server readiness, test completion, or regex matches.",
-			"Use `herdr` wait_agent only for panes running a recognized coding agent. It waits on agent statuses, not normal process completion; use watch/read for commands like tests or servers.",
-			"For agent panes, background finished panes usually become `done` while focused finished panes usually become `idle`.",
-			"Use `recent-unwrapped` when you need log matching or reads that ignore soft wrapping.",
-			"Pane references can be either friendly aliases you created earlier or real herdr pane ids from `list`.",
-			"Use `pane_split`, `tab_create`, or `workspace_create` to establish new pane targets. `pane_split` defaults to the agent's own pane when pane is omitted and splits right when direction is omitted. `run` only works with an existing pane alias or pane id.",
-			"Use friendly pane aliases like `server`, `reviewer`, or `tests` so later reads, watches, and sends can reuse them across the session.",
-			"When starting a fresh pi instance in another pane and the model matters, either specify `--model` explicitly or ask the user which model/provider they want.",
+			"Use `herdr` only when the user explicitly mentions Herdr or asks to inspect or control Herdr contexts. Do not invoke it merely because background work or delegation might help.",
+			"When the user asks to use Herdr, default to a sibling pane in the current tab and cwd. Create another tab, workspace, or cwd only when the user requests that topology.",
+			"Preserve the current UI focus by default. Set focus only when the user explicitly asks to switch context.",
+			"Use `herdr` run to submit a command or agent prompt because text and Enter are sent atomically. Use `herdr` send only for literal text or key injection without command submission semantics.",
+			"Use `herdr` watch for normal command output and `herdr` wait_agent only for recognized coding agents.",
+			"Treat both `idle` and `done` as completed agent states when inspecting status. `done` means the completed result is unseen; `idle` means it is seen.",
+			"Use `recent-unwrapped` for logs and transcripts, and `detection` only when agent-detection evidence is needed.",
+			"Pane actions target friendly aliases or opaque pane ids, never tab ids. Read ids from Herdr responses instead of constructing them.",
+			"When pane_split omits direction, the `herdr` tool chooses right or down from the source pane geometry.",
+			"Use friendly aliases such as `server`, `reviewer`, or `tests` for panes created by pane_split, tab_create, or workspace_create.",
 		],
 		parameters: Type.Object({
 			action: ActionEnum,
@@ -474,9 +525,10 @@ export default function (pi: ExtensionAPI) {
 			panes: Type.Optional(Type.Array(Type.String(), { description: "Pane aliases or pane ids for multi-pane waits" })),
 			workspace: Type.Optional(Type.String({ description: "Workspace id for workspace or tab actions" })),
 			tab: Type.Optional(Type.String({ description: "Tab id for tab actions or focus(tab) only. Pane actions must use pane ids or aliases." })),
-			label: Type.Optional(Type.String({ description: "Workspace or tab label for create actions" })),
+			label: Type.Optional(Type.String({ description: "Label for create, pane_split, or pane_rename actions" })),
 			newPane: Type.Optional(Type.String({ description: "Alias to remember for the pane created by pane_split" })),
 			direction: Type.Optional(DirectionEnum),
+			agent: Type.Optional(Type.String({ description: "Agent name, terminal id, or pane id for agent_get" })),
 			command: Type.Optional(Type.String({ description: "Line to submit atomically with Enter (for run action)" })),
 			match: Type.Optional(Type.String({ description: "Text or regex to wait for (for watch action)" })),
 			regex: Type.Optional(Type.Boolean({ description: "Treat match as a regex (for watch action)" })),
@@ -523,6 +575,13 @@ export default function (pi: ExtensionAPI) {
 							workspaceId: currentWorkspaceId,
 							paneAliases: Object.fromEntries(aliasByPaneId),
 						}),
+					};
+				}
+
+				case "current": {
+					return {
+						content: [{ type: "text", text: summarizePane(currentPane, undefined, currentPaneId) }],
+						details: withSnapshot({ action: "current", pane: currentPane }),
 					};
 				}
 
@@ -649,31 +708,53 @@ export default function (pi: ExtensionAPI) {
 						};
 					}
 					if (params.pane) {
-						const resolved = await requirePaneRef(params.pane, currentWorkspaceId, signal);
-						const response = await execHerdrJson<{ result: { tab: TabInfo } }>(["tab", "focus", resolved.pane.tab_id], signal);
+						const resolved = await requirePaneRef(params.pane, signal);
+						const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(
+							["agent", "focus", resolved.pane.pane_id],
+							signal,
+						);
 						return {
-							content: [{
-								type: "text",
-								text: `Focused tab '${response.result.tab.label}' for pane '${resolved.pane.pane_id}'. Herdr does not expose direct pane focus yet.`,
-							}],
-							details: withSnapshot({ action: "focus", target: "pane", paneId: resolved.pane.pane_id, tab: response.result.tab }),
+							content: [{ type: "text", text: `Focused pane '${resolved.alias || resolved.pane.pane_id}'` }],
+							details: withSnapshot({ action: "focus", target: "pane", agent: response.result.agent }),
 						};
 					}
 					throw new Error("'workspace', 'tab', or 'pane' is required for focus");
 				}
 
+				case "pane_rename": {
+					rejectUnexpectedParams("pane_rename", params, ["workspace", "tab"]);
+					const paneRef = params.pane;
+					if (!paneRef) throw new Error("'pane' is required for pane_rename");
+					if (!params.label) throw new Error("'label' is required for pane_rename");
+					const resolved = await requirePaneRef(paneRef, signal);
+					const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(
+						["pane", "rename", resolved.pane.pane_id, params.label],
+						signal,
+					);
+					return {
+						content: [{ type: "text", text: `Renamed pane '${resolved.alias || paneRef}' to '${params.label}'` }],
+						details: withSnapshot({ action: "pane_rename", pane: response.result.pane, alias: resolved.alias }),
+					};
+				}
+
 				case "pane_split": {
 					rejectUnexpectedParams("pane_split", params, ["workspace", "tab"]);
 					const paneRef = params.pane ?? currentPaneId;
-					const direction = params.direction ?? "right";
-
-					const sourcePane = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+					const sourcePane = await requirePaneRef(paneRef, signal);
+					const direction = params.direction ?? chooseSplitDirection(
+						await getPaneLayout(sourcePane.pane.pane_id, signal),
+						sourcePane.pane.pane_id,
+					);
 					const args = ["pane", "split", sourcePane.pane.pane_id, "--direction", direction];
 					if (params.cwd) args.push("--cwd", params.cwd);
 					if (params.focus !== true) args.push("--no-focus");
 
 					const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(args, signal);
 					const splitPane = response.result.pane;
+					const paneLabel = params.label ?? params.newPane;
+					if (paneLabel) {
+						await execHerdrJson(["pane", "rename", splitPane.pane_id, paneLabel], signal);
+					}
 					if (params.newPane) {
 						recordAlias(params.newPane, splitPane.pane_id, splitPane.workspace_id);
 					}
@@ -697,6 +778,27 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
+				case "agent_list": {
+					const agents = await getAgentList(signal);
+					return {
+						content: [{ type: "text", text: agents.length ? agents.map(summarizeAgent).join("\n") : "No agents." }],
+						details: withSnapshot({ action: "agent_list", agents }),
+					};
+				}
+
+				case "agent_get": {
+					let target = params.agent ?? params.pane;
+					if (!target) throw new Error("'agent' or 'pane' is required for agent_get");
+					if (managedPanes.has(target)) {
+						target = (await requirePaneRef(target, signal)).pane.pane_id;
+					}
+					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(["agent", "get", target], signal);
+					return {
+						content: [{ type: "text", text: summarizeAgent(response.result.agent) }],
+						details: withSnapshot({ action: "agent_get", agent: response.result.agent }),
+					};
+				}
+
 				case "run": {
 					rejectUnexpectedParams("run", params, ["workspace", "tab"]);
 					const paneRef = params.pane;
@@ -704,7 +806,7 @@ export default function (pi: ExtensionAPI) {
 					if (!paneRef) throw new Error("'pane' is required for run");
 					if (!command) throw new Error("'command' is required for run");
 
-					const targetPane = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+					const targetPane = await requirePaneRef(paneRef, signal);
 					await execHerdr(["pane", "run", targetPane.pane.pane_id, command], signal);
 
 					await sleep(800, signal);
@@ -731,7 +833,7 @@ export default function (pi: ExtensionAPI) {
 							pane: paneLabel,
 							paneId: targetPane.pane.pane_id,
 							command,
-							workspaceId: currentWorkspaceId,
+							workspaceId: targetPane.pane.workspace_id,
 						}),
 					};
 				}
@@ -741,7 +843,7 @@ export default function (pi: ExtensionAPI) {
 					const paneRef = params.pane;
 					if (!paneRef) throw new Error("'pane' is required for read");
 
-					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+					const resolved = await requirePaneRef(paneRef, signal);
 
 					const output = await readPane(
 						resolved.pane.pane_id,
@@ -770,8 +872,9 @@ export default function (pi: ExtensionAPI) {
 					const match = params.match;
 					if (!paneRef) throw new Error("'pane' is required for watch");
 					if (!match) throw new Error("'match' is required for watch");
+					if (params.source === "detection") throw new Error("watch does not support the detection source; use read");
 
-					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+					const resolved = await requirePaneRef(paneRef, signal);
 					const paneLabel = resolved.alias || paneRef;
 					const startTime = Date.now();
 
@@ -838,7 +941,7 @@ export default function (pi: ExtensionAPI) {
 					const resolvedPanes: Array<{ pane: PaneInfo; aliasOrRef: string }> = [];
 					for (const paneRef of paneRefs) {
 						throwIfAborted(signal, "wait_agent");
-						const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+						const resolved = await requirePaneRef(paneRef, signal);
 						resolvedPanes.push({
 							pane: resolved.pane,
 							aliasOrRef: resolved.alias || paneRef,
@@ -907,7 +1010,7 @@ export default function (pi: ExtensionAPI) {
 					if (!paneRef) throw new Error("'pane' is required for send");
 					if (!params.text && !params.keys) throw new Error("'text' or 'keys' is required for send");
 
-					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+					const resolved = await requirePaneRef(paneRef, signal);
 
 					if (params.text) {
 						await execHerdr(["pane", "send-text", resolved.pane.pane_id, params.text], signal);
@@ -935,7 +1038,7 @@ export default function (pi: ExtensionAPI) {
 					const paneRef = params.pane;
 					if (!paneRef) throw new Error("'pane' is required for stop");
 
-					const resolved = await requirePaneRef(paneRef, currentWorkspaceId, signal);
+					const resolved = await requirePaneRef(paneRef, signal);
 					if (resolved.pane.pane_id === currentPaneId) {
 						throw new Error("Refusing to close the pane pi is running in.");
 					}
@@ -966,10 +1069,12 @@ export default function (pi: ExtensionAPI) {
 			if (args.workspace) text += theme.fg("muted", ` ${args.workspace}`);
 			if (args.tab) text += theme.fg("muted", ` ${args.tab}`);
 			if (args.pane) text += theme.fg("muted", ` ${args.pane}`);
+			if (args.agent) text += theme.fg("muted", ` ${args.agent}`);
 			if (Array.isArray(args.panes) && args.panes.length) text += theme.fg("muted", ` ${args.panes.join(",")}`);
 			if (args.direction) text += theme.fg("dim", ` › ${args.direction}`);
 			if (args.command) text += theme.fg("dim", ` › ${args.command}`);
 			if (args.newPane) text += theme.fg("muted", ` ${args.newPane}`);
+			if (args.label) text += theme.fg("muted", ` “${args.label}”`);
 			if (args.match) text += theme.fg("dim", ` › ${args.match}`);
 			if (args.status) text += theme.fg("dim", ` › ${args.status}`);
 			if (Array.isArray(args.statuses) && args.statuses.length) text += theme.fg("dim", ` › ${args.statuses.join("|")}`);
@@ -1002,6 +1107,14 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			switch (details.action) {
+				case "current": {
+					const pane = details.pane as PaneInfo;
+					return new Text(theme.fg("accent", `◎ ${pane.label || pane.pane_id}`), 0, 0);
+				}
+				case "pane_rename": {
+					const pane = details.pane as PaneInfo;
+					return new Text(theme.fg("accent", `✎ ${details.alias || pane.pane_id}`) + theme.fg("dim", ` › ${pane.label || "renamed"}`), 0, 0);
+				}
 				case "pane_split": {
 					let text = theme.fg("accent", `▥ ${details.newPane || details.newPaneId}`);
 					text += theme.fg("dim", ` ‹ ${details.direction} from ${details.pane}`);
@@ -1058,6 +1171,19 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "focus": {
 					return new Text(theme.fg("accent", `◎ ${details.target}`), 0, 0);
+				}
+				case "agent_list": {
+					const agents = details.agents as AgentInfo[];
+					if (!agents?.length) return new Text(theme.fg("dim", "no agents"), 0, 0);
+					return new Text(
+						agents.map((agent) => `${statusDot(theme, agent.agent_status)} ${theme.fg(agent.focused ? "accent" : "muted", agentDisplayName(agent))} ${theme.fg("dim", agent.agent_status)}`).join("\n"),
+						0,
+						0,
+					);
+				}
+				case "agent_get": {
+					const agent = details.agent as AgentInfo;
+					return new Text(`${statusDot(theme, agent.agent_status)} ${theme.fg("accent", agentDisplayName(agent))} ${theme.fg("dim", agent.agent_status)}`, 0, 0);
 				}
 				case "workspace_list": {
 					const workspaces = details.workspaces as WorkspaceInfo[];
