@@ -59,7 +59,6 @@ interface GoalRuntimeState {
 	lastHandoffPrompt?: string;
 	continuationInFlight: boolean;
 	handoffInFlight: boolean;
-	capturedCommandContext?: ExtensionCommandContext;
 }
 
 let runtimeState: GoalRuntimeState | null = null;
@@ -108,7 +107,6 @@ function applyEntry(state: GoalRuntimeState | null, entry: GoalStateEntry): Goal
 			lastHandoffPrompt: entry.handoffPrompt,
 			continuationInFlight: false,
 			handoffInFlight: entry.status === "budget_limited" || entry.status === "handoff_started",
-			capturedCommandContext,
 		};
 	}
 
@@ -129,7 +127,6 @@ function applyEntry(state: GoalRuntimeState | null, entry: GoalStateEntry): Goal
 	pushUnique(state.sessions, entry.currentSession);
 
 	state.handoffInFlight = state.status === "budget_limited" || state.status === "handoff_started";
-	state.capturedCommandContext = capturedCommandContext;
 	return state;
 }
 
@@ -139,14 +136,12 @@ function reconstructState(ctx: ExtensionContext): GoalRuntimeState | null {
 		if (entry.type !== "custom" || entry.customType !== STATE_ENTRY) continue;
 		state = applyEntry(state, entry.data as GoalStateEntry);
 	}
-	if (state) state.capturedCommandContext = capturedCommandContext;
 	runtimeState = state;
 	return state;
 }
 
 function setController(ctx: ExtensionCommandContext | ReplacedSessionContext | undefined): void {
 	capturedCommandContext = ctx;
-	if (runtimeState) runtimeState.capturedCommandContext = ctx;
 }
 
 function appendState(pi: ExtensionAPI, event: GoalStateEvent, patch: Partial<GoalStateEntry> = {}): GoalStateEntry | null {
@@ -340,7 +335,7 @@ function buildSummary(ctx: ExtensionContext, state = runtimeState): string {
 	if (state.lastHandoffPrompt) lines.push(`Last handoff: ${shortObjective(state.lastHandoffPrompt, 160)}`);
 
 	lines.push("", "Controls: `/goal pause`, `/goal resume`, `/goal handoff`, `/goal clear`.");
-	if (!state.capturedCommandContext) {
+	if (!capturedCommandContext) {
 		lines.push("Automatic new-session handoff controller is not captured. Run `/goal resume` to restore it.");
 	}
 	return lines.join("\n");
@@ -372,7 +367,6 @@ function startGoal(pi: ExtensionAPI, ctx: ExtensionContext, objective: string, c
 		contextWindow: usage?.contextWindow ?? null,
 		continuationInFlight: false,
 		handoffInFlight: false,
-		capturedCommandContext: commandCtx ?? capturedCommandContext,
 	};
 
 	if (commandCtx) setController(commandCtx);
@@ -553,6 +547,35 @@ function startDeferredHandoff(params: {
 	}, 0);
 }
 
+function latestAssistantError(ctx: ExtensionContext): string | undefined {
+	const branch = ctx.sessionManager.getBranch() as any[];
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+		if (entry.message.stopReason !== "error") return undefined;
+		return entry.message.errorMessage || "Unknown agent error.";
+	}
+	return undefined;
+}
+
+function pauseAfterAgentError(pi: ExtensionAPI, ctx: ExtensionContext, error: string): void {
+	const state = runtimeState ?? reconstructState(ctx);
+	if (!state || state.status !== "active") return;
+
+	const usage = ctx.getContextUsage();
+	updateUsage(state, usage);
+	state.status = "paused";
+	state.continuationInFlight = false;
+	state.handoffInFlight = false;
+	appendState(pi, "status_changed", {
+		status: "paused",
+		currentSession: ctx.sessionManager.getSessionFile(),
+		...usageFields(usage, state),
+	});
+	updateTui(ctx, state);
+	if (ctx.hasUI) ctx.ui.notify(`Goal paused after agent error: ${shortObjective(error, 120)}`, "error");
+}
+
 function maybeQueueNextStep(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const state = runtimeState ?? reconstructState(ctx);
 	if (!state || state.status !== "active") return;
@@ -584,7 +607,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		capturedCommandContext = undefined;
-		if (runtimeState) runtimeState.capturedCommandContext = undefined;
 	});
 
 	pi.on("agent_start", async () => {
@@ -592,7 +614,12 @@ export default function (pi: ExtensionAPI) {
 		runtimeState.continuationInFlight = false;
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_settled", async (_event, ctx) => {
+		const error = latestAssistantError(ctx);
+		if (error) {
+			pauseAfterAgentError(pi, ctx, error);
+			return;
+		}
 		maybeQueueNextStep(pi, ctx);
 	});
 
@@ -757,7 +784,7 @@ export default function (pi: ExtensionAPI) {
 
 			const usage = ctx.getContextUsage();
 			updateUsage(runtimeState, usage);
-			const controller = runtimeState.capturedCommandContext ?? capturedCommandContext;
+			const controller = capturedCommandContext;
 			appendState(pi, "handoff_requested", {
 				status: "handoff_started",
 				currentSession: ctx.sessionManager.getSessionFile(),
