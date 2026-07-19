@@ -38,7 +38,11 @@ Controls:
 
 pi-goal keeps state append-only in the current session with `pi-goal:state` custom entries. It does not write `.pi/goals`, spawn worker agents, mutate the system prompt, patch provider payloads, or rewrite prior history.
 
+Automatic continuation runs on `agent_settled` (after retries, compaction, and queued follow-ups are done), not on `agent_end`. If the latest assistant message ends with `stopReason: "error"`, the goal pauses instead of queueing another continuation.
+
 At 95% context usage, pi-goal marks the goal budget-limited and asks the model to call `goal_handoff({ prompt })`. The extension then starts a linked new session with `parentSession` metadata and sends the self-contained handoff prompt as the first user message.
+
+Command-context used for linked-session handoff is kept only in process memory (module-level). It is not stored on reconstructable goal state, so session custom entries stay serializable.
 
 ## Tools
 
