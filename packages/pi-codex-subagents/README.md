@@ -26,8 +26,7 @@ pi install /absolute/path/to/pi-extensions/packages/pi-codex-subagents
 | `list_agents` | List current-session agents, or explicitly include historical sessions |
 | `read_agent_response` | Read an agent's latest final raw text response |
 | `send_message` | Steer a running agent or start another turn when settled |
-| `interrupt_agent` | Abort the current turn without closing the session |
-| `close_agent` | Permanently close an agent process |
+| `interrupt_agent` | Abort the current turn while preserving its session for later messages |
 
 Agent names are unique within their parent session. The same task name can exist safely in different Pi sessions. Read and control tools are always scoped to the current parent session; only `list_agents(include_all: true)` crosses session boundaries, and that view is read-only.
 
@@ -74,7 +73,8 @@ Optional configuration lives at:
 
 ```json
 {
-  "storageDir": "~/tmp/pi-agent-runs",
+  "storageDir": "~/.local/state/pi-codex-subagents/runs",
+  "retentionDays": 7,
   "defaults": {
     "skills": ["web-investigate"],
     "extensions": ["@scope/pi-extra-tools"]
@@ -82,7 +82,9 @@ Optional configuration lives at:
 }
 ```
 
-`storageDir` accepts an absolute path, `~/...`, or a path relative to the package configuration directory. By default runs are stored under the operating system temporary directory and may be removed by the OS. Configuration is read when agents spawn, so changes do not require restarting Pi.
+`storageDir` accepts an absolute path, `~/...`, or a path relative to the package configuration directory. By default runs are stored in `~/.pi/agent/pi-codex-subagents/runs`. `retentionDays` defaults to `7`; expired runs and oversized tool outputs are removed when the extension loads. Set it to `0` to disable automatic cleanup. Runtime sockets remain in the operating system temporary directory and are removed when agents stop.
+
+Configuration is read when agents spawn, while cleanup runs when the extension loads. Restart Pi after changing `storageDir` or `retentionDays` so storage lookup and cleanup use the same configuration throughout the process.
 
 Template skills and extensions override configured defaults. Skills explicitly requested by the parent are added to configured template/default skills. Tool selection belongs to the template or is inherited from the parent.
 
@@ -91,6 +93,8 @@ Template skills and extensions override configured defaults. Skills explicitly r
 `/agents` browses agents in the current session. Press Tab to switch to the read-only all-sessions view. `/subagent <task-name>` opens one current-session agent directly.
 
 The overlay uses the child working directory for tool rendering and synchronizes in-progress output when opened midway through a run. Use Left/Right to switch between agents in the current browser scope.
+
+Child RPC processes are terminated after completion, failure, or interruption so settled agents do not keep consuming memory. `send_message` starts a fresh child process with the persisted session and continues from there. On startup, the extension also reconciles and terminates validated owned children left behind by an earlier extension process.
 
 ## Output limits
 

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import * as fs from "node:fs";
@@ -12,20 +12,24 @@ export const PACKAGE_BASENAME = "pi-codex-subagents";
 export const SUBAGENT_DIR = path.join(getAgentDir(), PACKAGE_BASENAME);
 const CONFIG_PATH = path.join(SUBAGENT_DIR, "config.json");
 const AGENTS_DIR = path.join(SUBAGENT_DIR, "agents");
-const SOCKET_DIR = path.join(os.tmpdir(), PACKAGE_BASENAME, os.userInfo().username, "sockets");
+const TEMP_ROOT = path.join(process.env.PI_SUBAGENT_TEMP_DIR || os.tmpdir(), PACKAGE_BASENAME, os.userInfo().username);
+const LEGACY_RUNS_DIR = path.join(TEMP_ROOT, "runs");
+const SOCKET_DIR = path.join(TEMP_ROOT, "sockets");
 
 export const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
+export const DEFAULT_RETENTION_DAYS = 7;
 export const DEFAULT_THINKING = "high";
 export const DEFAULT_TOOLS = "read,bash,grep,find,ls";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const FINAL_STATUSES = new Set<AgentRuntimeStatus>(["completed", "failed", "interrupted", "closed"]);
+const FINAL_STATUSES = new Set<AgentRuntimeStatus>(["completed", "failed", "interrupted"]);
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-export type AgentRuntimeStatus = "starting" | "running" | "completed" | "failed" | "interrupted" | "closed";
+export type AgentRuntimeStatus = "starting" | "running" | "completed" | "failed" | "interrupted";
 
 export interface SubagentConfig {
   storageDir?: string;
+  retentionDays?: number;
   defaults?: {
     skills?: string[];
     extensions?: string[];
@@ -43,6 +47,15 @@ export interface AgentDefinition {
   skills?: string[];
   extensions?: string[];
   prompt?: string;
+}
+
+export interface ChildProcessOwnership {
+  pid: number;
+  processIdentity: string;
+  token: string;
+  ownerPid: number;
+  ownerProcessIdentity?: string;
+  startedAt: number;
 }
 
 export interface AgentInfo {
@@ -69,13 +82,13 @@ export interface AgentInfo {
   updatedAt: number;
   startedAt?: number;
   completedAt?: number;
-  closedAt?: number;
   lastActivity?: number;
   messageCount: number;
   status: AgentRuntimeStatus;
   lastTaskMessage?: string;
   finalResponse?: string;
   error?: string;
+  childProcess?: ChildProcessOwnership;
 }
 
 export interface AgentListEntry {
@@ -122,9 +135,12 @@ interface LiveAgent {
   pending: Map<string, PendingRequest>;
   reqId: number;
   stderr: string;
-  closed: boolean;
+  expectedExit: boolean;
   processFinished: boolean;
   finalizedRun: boolean;
+  exitPromise: Promise<void>;
+  resolveExit: () => void;
+  termination?: Promise<void>;
   candidateResponse: string;
   candidateError?: string;
 }
@@ -181,8 +197,12 @@ function normalizeConfig(value: unknown): SubagentConfig {
     ...(stringList(defaultsRaw.skills) ? { skills: stringList(defaultsRaw.skills) } : {}),
     ...(stringList(defaultsRaw.extensions) ? { extensions: stringList(defaultsRaw.extensions) } : {}),
   } : undefined;
+  const retentionDays = typeof raw.retentionDays === "number" && Number.isFinite(raw.retentionDays) && raw.retentionDays >= 0
+    ? raw.retentionDays
+    : undefined;
   return {
     ...(typeof raw.storageDir === "string" && raw.storageDir.trim() ? { storageDir: raw.storageDir.trim() } : {}),
+    ...(retentionDays !== undefined ? { retentionDays } : {}),
     ...(defaults && Object.keys(defaults).length ? { defaults } : {}),
   };
 }
@@ -200,13 +220,96 @@ export function getRunsDir(): string {
     const expanded = expandHome(configured);
     return path.isAbsolute(expanded) ? expanded : path.resolve(SUBAGENT_DIR, expanded);
   }
-  return path.join(os.tmpdir(), PACKAGE_BASENAME, os.userInfo().username, "runs");
+  return path.join(SUBAGENT_DIR, "runs");
+}
+
+function ensurePrivateDir(directory: string, enforceMode = false): void {
+  const existed = fs.existsSync(directory);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32" && (enforceMode || !existed)) fs.chmodSync(directory, 0o700);
 }
 
 function ensureBaseDirs(): void {
   fs.mkdirSync(AGENTS_DIR, { recursive: true });
-  fs.mkdirSync(getRunsDir(), { recursive: true });
-  fs.mkdirSync(SOCKET_DIR, { recursive: true });
+  ensurePrivateDir(getRunsDir(), !loadSubagentConfig().storageDir);
+  ensurePrivateDir(SOCKET_DIR, true);
+}
+
+const SCOPE_DIR_PATTERN = /^[0-9a-f]{24}$/;
+const AGENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const OUTPUT_FILE_PATTERN = /^\d+-[0-9a-f-]{36}\.txt$/i;
+const TASK_LOCK_PATTERN = /^\.task-[0-9a-f]{24}\.lock$/;
+
+function isAgentArtifact(name: string, agentId: string): boolean {
+  return name === `${agentId}.jsonl`
+    || name === `${agentId}.info.json`
+    || name === `${agentId}.log`
+    || new RegExp(`^${agentId}\\.info\\.json\\.\\d+\\.tmp$`).test(name);
+}
+
+function pruneScope(directory: string, cutoff: number): void {
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".info.json")) continue;
+    const agentId = entry.name.slice(0, -".info.json".length);
+    if (!AGENT_ID_PATTERN.test(agentId)) continue;
+    const info = readInfoFile(path.join(directory, entry.name));
+    const agentEntries = entries.filter((candidate) => candidate.isFile() && isAgentArtifact(candidate.name, agentId));
+    let latest = Math.max(info?.lastActivity ?? 0, info?.updatedAt ?? 0, info?.createdAt ?? 0);
+    for (const candidate of agentEntries) {
+      try { latest = Math.max(latest, fs.statSync(path.join(directory, candidate.name)).mtimeMs); } catch {}
+    }
+    if (isRunActive(agentId) || latest >= cutoff) continue;
+    let failed = false;
+    for (const candidate of agentEntries.filter((candidate) => candidate.name !== entry.name)) {
+      try { fs.rmSync(path.join(directory, candidate.name), { force: true }); } catch { failed = true; }
+    }
+    if (failed) continue;
+    try { fs.rmSync(path.join(directory, entry.name), { force: true }); } catch {}
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !TASK_LOCK_PATTERN.test(entry.name)) continue;
+    const lockFile = path.join(directory, entry.name);
+    try {
+      if (fs.statSync(lockFile).mtimeMs >= cutoff) continue;
+      const owner = JSON.parse(fs.readFileSync(lockFile, "utf8")) as { pid?: number };
+      if (typeof owner.pid === "number" && processAlive(owner.pid)) continue;
+    } catch {}
+    try { fs.rmSync(lockFile, { force: true }); } catch {}
+  }
+
+  try { fs.rmdirSync(directory); } catch {}
+}
+
+function pruneRunsRoot(root: string, cutoff: number): void {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const target = path.join(root, entry.name);
+    if (entry.name === "_outputs" && entry.isDirectory()) {
+      let outputs: fs.Dirent[];
+      try { outputs = fs.readdirSync(target, { withFileTypes: true }); } catch { continue; }
+      for (const output of outputs) {
+        if (!output.isFile() || !OUTPUT_FILE_PATTERN.test(output.name)) continue;
+        const outputPath = path.join(target, output.name);
+        try {
+          if (fs.statSync(outputPath).mtimeMs < cutoff) fs.rmSync(outputPath, { force: true });
+        } catch {}
+      }
+      continue;
+    }
+    if (!entry.isDirectory() || !SCOPE_DIR_PATTERN.test(entry.name)) continue;
+    try { pruneScope(target, cutoff); } catch {}
+  }
+}
+
+function pruneExpiredRuns(): void {
+  const retentionDays = loadSubagentConfig().retentionDays ?? DEFAULT_RETENTION_DAYS;
+  if (retentionDays === 0) return;
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  for (const root of runsRoots()) pruneRunsRoot(root, cutoff);
 }
 
 export function parentScopeKey(parentSessionId: string): string {
@@ -217,8 +320,17 @@ export function taskStorageKey(taskName: string): string {
   return createHash("sha256").update(taskName).digest("hex").slice(0, 24);
 }
 
+function runsRoots(): string[] {
+  return [...new Set([getRunsDir(), LEGACY_RUNS_DIR])];
+}
+
 function scopeDir(parentSessionId: string): string {
   return path.join(getRunsDir(), parentScopeKey(parentSessionId));
+}
+
+function scopeDirs(parentSessionId: string): string[] {
+  const key = parentScopeKey(parentSessionId);
+  return runsRoots().map((root) => path.join(root, key));
 }
 
 function normalizeTaskName(name: string): string {
@@ -239,38 +351,43 @@ function saveInfo(info: AgentInfo): void {
 
 function readInfoFile(file: string): AgentInfo | undefined {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8")) as AgentInfo;
+    const info = JSON.parse(fs.readFileSync(file, "utf8")) as Omit<AgentInfo, "status"> & { status: AgentRuntimeStatus | "closed"; closedAt?: number };
+    if (info.status === "closed") {
+      info.status = info.error ? "failed" : info.finalResponse !== undefined ? "completed" : "interrupted";
+      delete info.closedAt;
+    }
+    return info as AgentInfo;
   } catch {
     return undefined;
   }
 }
 
-function readScopeInfos(parentSessionId: string): AgentInfo[] {
-  const directory = scopeDir(parentSessionId);
+function readInfos(directory: string): AgentInfo[] {
   if (!fs.existsSync(directory)) return [];
   return fs.readdirSync(directory)
     .filter((name) => name.endsWith(".info.json"))
     .flatMap((name) => {
       const info = readInfoFile(path.join(directory, name));
       return info ? [info] : [];
-    })
-    .sort((a, b) => (b.lastActivity ?? b.updatedAt ?? b.createdAt) - (a.lastActivity ?? a.updatedAt ?? a.createdAt));
+    });
+}
+
+function sortInfos(infos: AgentInfo[]): AgentInfo[] {
+  return infos.sort((a, b) => (b.lastActivity ?? b.updatedAt ?? b.createdAt) - (a.lastActivity ?? a.updatedAt ?? a.createdAt));
+}
+
+function readScopeInfos(parentSessionId: string): AgentInfo[] {
+  return sortInfos(scopeDirs(parentSessionId).flatMap(readInfos));
 }
 
 function readAllInfos(): AgentInfo[] {
-  const root = getRunsDir();
-  if (!fs.existsSync(root)) return [];
-  const infos: AgentInfo[] = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === "_outputs") continue;
-    const directory = path.join(root, entry.name);
-    for (const name of fs.readdirSync(directory)) {
-      if (!name.endsWith(".info.json")) continue;
-      const info = readInfoFile(path.join(directory, name));
-      if (info) infos.push(info);
-    }
-  }
-  return infos.sort((a, b) => (b.lastActivity ?? b.updatedAt ?? b.createdAt) - (a.lastActivity ?? a.updatedAt ?? a.createdAt));
+  const directories = runsRoots().flatMap((root) => {
+    if (!fs.existsSync(root)) return [];
+    return fs.readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && SCOPE_DIR_PATTERN.test(entry.name))
+      .map((entry) => path.join(root, entry.name));
+  });
+  return sortInfos(directories.flatMap(readInfos));
 }
 
 export function getAgent(name: string, parentSessionId: string): AgentInfo | null {
@@ -429,37 +546,93 @@ export function getSocketPath(agentId: string): string {
     : path.join(SOCKET_DIR, `${agentId}.sock`);
 }
 
-function markerPath(agentId: string): string {
-  return path.join(SOCKET_DIR, `${agentId}.peek.json`);
+function markerPath(agentId: string, kind: "active" | "peek"): string {
+  return path.join(SOCKET_DIR, `${agentId}.${kind}.json`);
 }
 
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === "EPERM"; }
 }
 
-function markPeekActive(agentId: string, marker: PeekMarker): void {
-  fs.mkdirSync(SOCKET_DIR, { recursive: true });
-  fs.writeFileSync(markerPath(agentId), JSON.stringify(marker, null, 2));
+interface ProcessSnapshot {
+  identity: string;
+  tokenMatches?: boolean;
 }
 
-function clearPeekActive(agentId: string, owner?: Pick<PeekMarker, "pid" | "token">): void {
+function hashIdentity(value: string | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function inspectProcess(pid: number, token?: string): ProcessSnapshot | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !processAlive(pid)) return undefined;
   try {
-    if (owner && fs.existsSync(markerPath(agentId))) {
-      const current = JSON.parse(fs.readFileSync(markerPath(agentId), "utf8"));
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const startTicks = fields[19];
+      const commandLine = fs.readFileSync(`/proc/${pid}/cmdline`);
+      if (!startTicks || !commandLine.length) return undefined;
+      const environment = token ? fs.readFileSync(`/proc/${pid}/environ`) : undefined;
+      return {
+        identity: `linux:${startTicks}:${hashIdentity(commandLine)}`,
+        ...(token ? { tokenMatches: environment?.includes(Buffer.from(`PI_SUBAGENT_OWNER_TOKEN=${token}\0`)) ?? false } : {}),
+      };
+    }
+    if (process.platform === "win32") {
+      const script = `$p=Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p) { [Console]::Out.Write($p.CreationDate.ToUniversalTime().Ticks.ToString() + [char]0 + $p.CommandLine) }`;
+      const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 3000 });
+      const output = result.status === 0 ? result.stdout : "";
+      return output ? { identity: `windows:${hashIdentity(output)}` } : undefined;
+    }
+    const result = spawnSync("ps", ["eww", "-p", String(pid), "-o", "lstart=", "-o", "command="], { encoding: "utf8", timeout: 3000 });
+    const output = result.status === 0 ? result.stdout.trim() : "";
+    if (!output) return undefined;
+    return {
+      identity: `unix:${hashIdentity(output)}`,
+      ...(token ? { tokenMatches: output.includes(`PI_SUBAGENT_OWNER_TOKEN=${token}`) } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function ownershipMatches(ownership: ChildProcessOwnership): boolean {
+  const snapshot = inspectProcess(ownership.pid, ownership.token);
+  return snapshot?.identity === ownership.processIdentity && snapshot.tokenMatches !== false;
+}
+
+function markActive(agentId: string, kind: "active" | "peek", marker: PeekMarker): void {
+  fs.writeFileSync(markerPath(agentId, kind), JSON.stringify(marker, null, 2));
+}
+
+function clearActive(agentId: string, kind: "active" | "peek", owner?: Pick<PeekMarker, "pid" | "token">): void {
+  const file = markerPath(agentId, kind);
+  try {
+    if (owner && fs.existsSync(file)) {
+      const current = JSON.parse(fs.readFileSync(file, "utf8"));
       if (current.pid !== owner.pid || current.token !== owner.token) return;
     }
-    fs.unlinkSync(markerPath(agentId));
+    fs.unlinkSync(file);
   } catch {}
+}
+
+function isActive(agentId: string, kind: "active" | "peek"): boolean {
+  const file = markerPath(agentId, kind);
+  try {
+    if (!fs.existsSync(file)) return false;
+    const marker = JSON.parse(fs.readFileSync(file, "utf8")) as PeekMarker;
+    if (processAlive(marker.pid)) return true;
+    clearActive(agentId, kind, marker);
+  } catch {}
+  return false;
+}
+
+function isRunActive(agentId: string): boolean {
+  return isActive(agentId, "active") || isActive(agentId, "peek");
 }
 
 export function isPeekActive(agentId: string): boolean {
-  try {
-    if (!fs.existsSync(markerPath(agentId))) return false;
-    const marker = JSON.parse(fs.readFileSync(markerPath(agentId), "utf8")) as PeekMarker;
-    if (processAlive(marker.pid)) return true;
-    clearPeekActive(agentId, marker);
-  } catch {}
-  return false;
+  return isActive(agentId, "peek");
 }
 
 class SessionLogger {
@@ -489,7 +662,8 @@ class EventBroadcaster {
   constructor(private readonly agentId: string) {}
 
   start(): void {
-    fs.mkdirSync(SOCKET_DIR, { recursive: true });
+    ensurePrivateDir(SOCKET_DIR, true);
+    markActive(this.agentId, "active", this.marker);
     const socketPath = getSocketPath(this.agentId);
     if (process.platform !== "win32") {
       try { if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath); } catch {}
@@ -510,9 +684,9 @@ class EventBroadcaster {
       connection.on("close", remove);
       connection.on("error", remove);
     });
-    this.server.on("listening", () => markPeekActive(this.agentId, this.marker));
-    this.server.on("error", () => this.stop());
-    try { this.server.listen(socketPath); } catch { this.stop(); }
+    this.server.on("listening", () => markActive(this.agentId, "peek", this.marker));
+    this.server.on("error", () => this.stopSocket());
+    try { this.server.listen(socketPath); } catch { this.stopSocket(); }
   }
 
   broadcast(event: any): void {
@@ -564,10 +738,10 @@ class EventBroadcaster {
     }
   }
 
-  stop(): void {
-    clearPeekActive(this.agentId, this.marker);
+  private stopSocket(): void {
+    clearActive(this.agentId, "peek", this.marker);
     for (const connection of this.connections) {
-      try { connection.end(); } catch {}
+      try { connection.destroy(); } catch {}
     }
     this.connections = [];
     try { this.server?.close(); } catch {}
@@ -575,6 +749,11 @@ class EventBroadcaster {
     if (process.platform !== "win32") {
       try { if (fs.existsSync(getSocketPath(this.agentId))) fs.unlinkSync(getSocketPath(this.agentId)); } catch {}
     }
+  }
+
+  stop(): void {
+    clearActive(this.agentId, "active", this.marker);
+    this.stopSocket();
   }
 }
 
@@ -645,10 +824,99 @@ export class AgentManager {
   private waiters: Waiter[] = [];
   private readonly defaultWaitAllTargets = new Map<string, Set<string>>();
   private readonly shutdownController = new AbortController();
+  private readonly ownerProcessIdentity = inspectProcess(process.pid)?.identity;
+  private readonly reconciliation: Promise<void>;
 
-  constructor() { ensureBaseDirs(); }
+  constructor() {
+    ensureBaseDirs();
+    pruneExpiredRuns();
+    this.reconciliation = this.reconcilePersistedChildren();
+  }
+
+  private clearChildOwnership(info: AgentInfo, expectedToken: string): void {
+    const persisted = readInfoFile(info.infoFile);
+    if (persisted?.childProcess?.token === expectedToken) {
+      delete persisted.childProcess;
+      saveInfo(persisted);
+    }
+    if (info.childProcess?.token === expectedToken) delete info.childProcess;
+  }
+
+  private async waitForOwnedExit(ownership: ChildProcessOwnership, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!ownershipMatches(ownership)) return true;
+      await delay(25);
+    }
+    return !ownershipMatches(ownership);
+  }
+
+  private signalOwnedProcess(ownership: ChildProcessOwnership, signal: NodeJS.Signals): void {
+    if (!ownershipMatches(ownership)) return;
+    try {
+      if (process.platform !== "win32") process.kill(-ownership.pid, signal);
+      else process.kill(ownership.pid, signal);
+    } catch {
+      try { process.kill(ownership.pid, signal); } catch {}
+    }
+  }
+
+  private async terminateOwnedChild(info: AgentInfo): Promise<void> {
+    const ownership = info.childProcess;
+    if (!ownership) return;
+    if (!ownershipMatches(ownership)) {
+      this.clearChildOwnership(info, ownership.token);
+      return;
+    }
+    if (process.platform === "win32") {
+      await new Promise<void>((resolve) => {
+        const killer = spawn("taskkill", ["/pid", String(ownership.pid), "/T", "/F"], { stdio: "ignore" });
+        killer.once("error", () => resolve());
+        killer.once("exit", () => resolve());
+      });
+      await this.waitForOwnedExit(ownership, 2000);
+    } else {
+      this.signalOwnedProcess(ownership, "SIGTERM");
+      if (!await this.waitForOwnedExit(ownership, 1000)) {
+        this.signalOwnedProcess(ownership, "SIGKILL");
+        await this.waitForOwnedExit(ownership, 1000);
+      }
+    }
+    if (ownershipMatches(ownership)) throw new Error(`Unable to terminate owned child process for ${info.canonicalName}.`);
+    this.clearChildOwnership(info, ownership.token);
+  }
+
+  private async reconcilePersistedChildren(): Promise<void> {
+    for (const info of readAllInfos()) {
+      const ownership = info.childProcess;
+      if (!ownership) continue;
+      try {
+        if (!ownershipMatches(ownership)) {
+          if (info.status === "starting" || info.status === "running") {
+            info.status = "interrupted";
+            info.lastActivity = Date.now();
+            saveInfo(info);
+          }
+          this.clearChildOwnership(info, ownership.token);
+          continue;
+        }
+        const ownerSnapshot = inspectProcess(ownership.ownerPid);
+        const ownerStillActive = ownership.ownerPid !== process.pid
+          && ownerSnapshot
+          && (!ownership.ownerProcessIdentity || ownerSnapshot.identity === ownership.ownerProcessIdentity);
+        if (ownerStillActive) continue;
+        if (info.status === "starting" || info.status === "running") {
+          info.status = "interrupted";
+          info.lastActivity = Date.now();
+          saveInfo(info);
+        }
+        await this.terminateOwnedChild(info);
+      } catch {}
+    }
+  }
 
   async spawnAgent(params: SpawnAgentParams): Promise<{ task_name: string; nickname: null }> {
+    await this.reconciliation;
     const taskName = normalizeTaskName(params.task_name);
     const definition = getAgentDefinition(params.agent_type);
     if (params.agent_type && !definition) throw new Error(`Agent template not found: ${params.agent_type}`);
@@ -666,13 +934,14 @@ export class AgentManager {
     const thinking = definition?.thinking ?? params.inheritedThinking ?? DEFAULT_THINKING;
     const cwd = path.resolve(params.cwd);
     const directory = scopeDir(params.parentSessionId);
-    fs.mkdirSync(directory, { recursive: true });
+    ensurePrivateDir(directory, true);
 
     const lockFile = path.join(directory, `.task-${taskStorageKey(taskName)}.lock`);
     let lock: number | undefined;
     try {
       try {
         lock = fs.openSync(lockFile, "wx");
+        fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
       } catch (error: any) {
         if (error?.code === "EEXIST") throw new Error(`Agent ${taskName} is already being created.`);
         throw error;
@@ -746,13 +1015,16 @@ export class AgentManager {
     }
     for (const extensionPath of info.extensionPaths ?? []) args.push("--extension", extensionPath);
     for (const skillPath of info.skillPaths ?? []) args.push("--skill", skillPath);
+    const childToken = randomUUID();
     logger.info("spawn", "starting child pi", { command: launch.command, args, cwd: info.cwd });
     const proc = spawn(launch.command, args, {
       cwd: info.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: { ...process.env, PI_SUBAGENT_OWNER_TOKEN: childToken },
       detached: process.platform !== "win32",
     });
+    let resolveExit!: () => void;
+    const exitPromise = new Promise<void>((resolve) => { resolveExit = resolve; });
     const live: LiveAgent = {
       info,
       proc,
@@ -761,9 +1033,11 @@ export class AgentManager {
       pending: new Map(),
       reqId: 0,
       stderr: "",
-      closed: false,
+      expectedExit: false,
       processFinished: false,
       finalizedRun: false,
+      exitPromise,
+      resolveExit,
       candidateResponse: "",
     };
     this.live.set(info.id, live);
@@ -771,17 +1045,32 @@ export class AgentManager {
     const finishProcess = (error?: Error) => {
       if (live.processFinished) return;
       live.processFinished = true;
+      const persisted = readInfoFile(live.info.infoFile);
+      if (persisted && FINAL_STATUSES.has(persisted.status)) {
+        live.info = persisted;
+        live.finalizedRun = true;
+      }
       for (const [requestId, pending] of live.pending) {
         clearTimeout(pending.timer);
         pending.reject(error ?? new Error("Child Pi process exited before responding."));
         live.pending.delete(requestId);
       }
-      if (!live.closed && !live.finalizedRun && !FINAL_STATUSES.has(live.info.status)) {
+      if (!live.expectedExit && !live.finalizedRun && !FINAL_STATUSES.has(live.info.status)) {
         this.markFailed(live, error?.message ?? "Child Pi process exited unexpectedly.");
       }
-      this.live.delete(info.id);
+      const ownership = live.info.childProcess;
+      if (ownership) this.clearChildOwnership(live.info, ownership.token);
+      if (this.live.get(info.id) === live) this.live.delete(info.id);
       broadcaster.stop();
       logger.close();
+      proc.stdin.removeAllListeners();
+      proc.stdout.removeAllListeners();
+      proc.stderr.removeAllListeners();
+      proc.removeAllListeners();
+      try { proc.stdin.destroy(); } catch {}
+      try { proc.stdout.destroy(); } catch {}
+      try { proc.stderr.destroy(); } catch {}
+      live.resolveExit();
     };
     proc.stdout.on("data", (chunk) => {
       for (const line of decoder.push(chunk)) this.handleLine(live, line);
@@ -794,16 +1083,44 @@ export class AgentManager {
       live.stderr = `${live.stderr}${chunk}`.slice(-64 * 1024);
       logger.stderr(chunk);
     });
-    proc.stdin.on("error", (error) => finishProcess(error));
+    proc.stdin.on("error", (error) => {
+      logger.info("stdin", "child stdin error", { error: error.message });
+      if (!live.expectedExit) {
+        const persisted = readInfoFile(live.info.infoFile);
+        if (persisted && FINAL_STATUSES.has(persisted.status)) {
+          live.info = persisted;
+          live.finalizedRun = true;
+        } else if (!live.finalizedRun) {
+          this.markFailed(live, error.message);
+        }
+        void this.terminateProcess(live);
+      }
+    });
     proc.on("error", (error) => finishProcess(error));
     proc.on("exit", (code, signal) => {
       logger.info("exit", "child exited", { code, signal });
       const suffix = live.stderr.trim() ? `: ${live.stderr.trim().slice(-1000)}` : "";
-      finishProcess(live.closed ? undefined : new Error(`Child Pi exited (code=${code}, signal=${signal})${suffix}`));
+      finishProcess(live.expectedExit ? undefined : new Error(`Child Pi exited (code=${code}, signal=${signal})${suffix}`));
     });
 
     try {
+      if (!proc.pid) throw new Error("Child Pi process did not provide a PID.");
       await this.sendCommand(live, { type: "get_state" }, DEFAULT_STARTUP_TIMEOUT_MS);
+      let snapshot: ProcessSnapshot | undefined;
+      for (let attempt = 0; attempt < 20 && !snapshot; attempt++) {
+        snapshot = inspectProcess(proc.pid, childToken);
+        if (!snapshot || snapshot.tokenMatches === false) await delay(10);
+      }
+      if (!snapshot || snapshot.tokenMatches === false) throw new Error("Unable to verify child Pi process ownership.");
+      info.childProcess = {
+        pid: proc.pid,
+        processIdentity: snapshot.identity,
+        token: childToken,
+        ownerPid: process.pid,
+        ownerProcessIdentity: this.ownerProcessIdentity,
+        startedAt: Date.now(),
+      };
+      saveInfo(info);
       if (initialMessage) await this.prompt(live, initialMessage, displayMessage);
       return live;
     } catch (error) {
@@ -814,7 +1131,7 @@ export class AgentManager {
   }
 
   private sendCommand(live: LiveAgent, command: Record<string, unknown>, timeoutMs = DEFAULT_STARTUP_TIMEOUT_MS): Promise<any> {
-    if (live.processFinished || live.closed) return Promise.reject(new Error(`Agent ${live.info.taskName} process is not available.`));
+    if (live.processFinished || live.expectedExit) return Promise.reject(new Error(`Agent ${live.info.taskName} process is not available.`));
     const id = `req-${++live.reqId}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -876,6 +1193,13 @@ export class AgentManager {
       else pending.reject(new Error(event.error || "RPC command failed"));
       return;
     }
+    const persisted = readInfoFile(live.info.infoFile);
+    if (persisted && FINAL_STATUSES.has(persisted.status) && persisted.status !== live.info.status) {
+      live.info = persisted;
+      live.finalizedRun = true;
+      return;
+    }
+    if (live.finalizedRun || live.expectedExit) return;
     if (event.type === "agent_start") {
       live.info.status = "running";
       live.info.lastActivity = Date.now();
@@ -912,9 +1236,12 @@ export class AgentManager {
       return;
     }
     if (event.type === "agent_settled") {
-      if (live.info.status === "interrupted" || live.info.status === "closed" || live.finalizedRun) return;
+      if (live.info.status === "interrupted" || live.finalizedRun) return;
       if (live.candidateError) this.markFailed(live, live.candidateError);
       else this.markCompleted(live);
+      void this.terminateProcess(live).catch((error) => {
+        live.logger.info("hibernate", "failed to terminate settled child", { error: error instanceof Error ? error.message : String(error) });
+      });
     }
   }
 
@@ -1098,13 +1425,20 @@ export class AgentManager {
   }
 
   async sendMessage(parentSessionId: string, target: string, message: string): Promise<{ delivery: "steer" | "prompt" }> {
-    const info = this.getAgentInfo(target, parentSessionId);
-    if (info.status === "closed") throw new Error(`Agent is closed: ${target}`);
+    await this.reconciliation;
+    let info = this.getAgentInfo(target, parentSessionId);
     let live = this.live.get(info.id);
+    if (live?.expectedExit) {
+      await live.termination;
+      live = undefined;
+      info = this.getAgentInfo(target, parentSessionId);
+    }
     const wasLive = Boolean(live);
     if (!live) {
+      if (info.childProcess) await this.terminateOwnedChild(info);
       if (info.status === "starting" || info.status === "running") {
         info.status = "interrupted";
+        info.lastActivity = Date.now();
         saveInfo(info);
       }
       live = await this.startLiveAgent(info);
@@ -1121,32 +1455,24 @@ export class AgentManager {
   }
 
   async interruptAgent(parentSessionId: string, target: string): Promise<{ previous_status: AgentRuntimeStatus }> {
+    await this.reconciliation;
     const info = this.getAgentInfo(target, parentSessionId);
     const previous = info.status;
     if (previous !== "starting" && previous !== "running") return { previous_status: previous };
     const live = this.live.get(info.id);
-    if (live) await this.sendCommand(live, { type: "abort" });
     info.status = "interrupted";
     info.lastActivity = Date.now();
     saveInfo(info);
-    if (live) live.finalizedRun = true;
+    if (live) {
+      live.info.status = "interrupted";
+      live.info.lastActivity = info.lastActivity;
+      live.finalizedRun = true;
+      await this.terminateProcess(live);
+    } else {
+      await this.terminateOwnedChild(info);
+    }
     this.finishWaitTarget(parentSessionId, info.canonicalName);
     this.pushMailbox({ id: randomUUID(), parentSessionId, agentName: info.canonicalName, status: "interrupted", createdAt: Date.now() });
-    return { previous_status: previous };
-  }
-
-  async closeAgent(parentSessionId: string, target: string): Promise<{ previous_status: AgentRuntimeStatus }> {
-    const info = this.getAgentInfo(target, parentSessionId);
-    const previous = info.status;
-    if (previous === "closed") return { previous_status: previous };
-    const live = this.live.get(info.id);
-    info.status = "closed";
-    info.closedAt = Date.now();
-    info.lastActivity = Date.now();
-    saveInfo(info);
-    this.finishWaitTarget(parentSessionId, info.canonicalName);
-    this.pushMailbox({ id: randomUUID(), parentSessionId, agentName: info.canonicalName, status: "closed", createdAt: Date.now() });
-    if (live) await this.terminateProcess(live);
     return { previous_status: previous };
   }
 
@@ -1168,32 +1494,38 @@ export class AgentManager {
     });
   }
 
-  private async terminateProcess(live: LiveAgent): Promise<void> {
-    if (live.processFinished) return;
-    try { await this.sendCommand(live, { type: "abort" }, 1000); } catch {}
-    live.closed = true;
-    try { live.proc.stdin.end(); } catch {}
-    const exited = new Promise<void>((resolve) => live.proc.once("exit", () => resolve()));
-    await Promise.race([exited, delay(500)]);
-    if (!live.processFinished) {
-      this.signalProcessTree(live, "SIGTERM");
-      await Promise.race([exited, delay(1000)]);
-    }
-    if (!live.processFinished) {
-      if (process.platform === "win32") await this.forceKillWindowsTree(live);
-      else this.signalProcessTree(live, "SIGKILL");
-      await Promise.race([exited, delay(1000)]);
-    }
-    if (!live.processFinished) throw new Error(`Unable to terminate child Pi process for ${live.info.canonicalName}.`);
+  private terminateProcess(live: LiveAgent): Promise<void> {
+    if (live.processFinished) return Promise.resolve();
+    if (live.termination) return live.termination;
+    live.termination = (async () => {
+      const abortRequest = this.sendCommand(live, { type: "abort" }, 1000);
+      live.expectedExit = true;
+      try { await abortRequest; } catch {}
+      try { live.proc.stdin.end(); } catch {}
+      await Promise.race([live.exitPromise, delay(500)]);
+      if (!live.processFinished) {
+        this.signalProcessTree(live, "SIGTERM");
+        await Promise.race([live.exitPromise, delay(1000)]);
+      }
+      if (!live.processFinished) {
+        if (process.platform === "win32") await this.forceKillWindowsTree(live);
+        else this.signalProcessTree(live, "SIGKILL");
+        await Promise.race([live.exitPromise, delay(1000)]);
+      }
+      if (!live.processFinished) throw new Error(`Unable to terminate child Pi process for ${live.info.canonicalName}.`);
+    })();
+    return live.termination;
   }
 
   async shutdown(): Promise<void> {
     this.shutdownController.abort(new Error("Agent manager shut down."));
+    await this.reconciliation;
     const terminations: Promise<void>[] = [];
     for (const live of this.live.values()) {
       if (live.info.status === "starting" || live.info.status === "running") {
         live.info.status = "interrupted";
         live.info.lastActivity = Date.now();
+        live.finalizedRun = true;
         saveInfo(live.info);
       }
       terminations.push(this.terminateProcess(live));
@@ -1204,7 +1536,7 @@ export class AgentManager {
 
 export function writeFullToolOutput(content: string): string {
   const directory = path.join(getRunsDir(), "_outputs");
-  fs.mkdirSync(directory, { recursive: true });
+  ensurePrivateDir(directory, true);
   const file = path.join(directory, `${Date.now()}-${randomUUID()}.txt`);
   fs.writeFileSync(file, content);
   return file;

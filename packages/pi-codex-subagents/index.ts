@@ -54,8 +54,8 @@ function formatDuration(ms: number): string {
 
 function runtimeLabel(info: AgentInfo): string {
   const start = info.startedAt || info.createdAt;
-  const final = ["completed", "failed", "interrupted", "closed"].includes(info.status);
-  const end = final ? (info.completedAt || info.closedAt || info.updatedAt || Date.now()) : Date.now();
+  const final = ["completed", "failed", "interrupted"].includes(info.status);
+  const end = final ? (info.completedAt || info.updatedAt || Date.now()) : Date.now();
   return formatDuration(end - start);
 }
 
@@ -240,7 +240,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
   pi.registerTool({
     name: "send_message",
     label: "Send Message",
-    description: "Send a message to a session-owned agent. Steers the current run when active; otherwise starts a new turn. Closed agents cannot be resumed.",
+    description: "Send a message to a session-owned agent. Steers the current run when active; otherwise starts a new turn.",
     parameters: Type.Object({
       target: Type.String({ description: "Session-owned agent task name." }),
       message: Type.String({ description: "Message text to send." }),
@@ -277,26 +277,6 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     renderResult(result: any, _options: any, theme: Theme) {
       if (result.isError) return new Text(theme.fg("error", "✗ interrupt failed"), 0, 0);
       return new Text(theme.fg("warning", `↯ previous: ${result.details?.previous_status || "unknown"}`), 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: "close_agent",
-    label: "Close Agent",
-    description: "Permanently close a session-owned agent process. Its history remains readable, but it cannot receive more messages.",
-    parameters: Type.Object({ target: Type.String({ description: "Session-owned agent task name." }) }),
-    async execute(_id: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
-      try {
-        const result = await manager.closeAgent(parentSessionId(ctx), cleanTarget(params.target));
-        return textResult("Agent closed.", result);
-      } catch (error) {
-        throw new Error(`close_agent failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    },
-    renderCall(args: any, theme: Theme) { return new Text(theme.fg("toolTitle", theme.bold("close_agent ")) + theme.fg("accent", args.target || "?"), 0, 0); },
-    renderResult(result: any, _options: any, theme: Theme) {
-      if (result.isError) return new Text(theme.fg("error", "✗ close failed"), 0, 0);
-      return new Text(theme.fg("success", `✓ previous: ${result.details?.previous_status || "unknown"}`), 0, 0);
     },
   });
 
