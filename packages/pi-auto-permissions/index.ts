@@ -4,7 +4,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAutoPermissionsConfig, type AutoPermissionsConfig } from "./config.js";
@@ -78,8 +78,25 @@ function reviewerFingerprint(
   });
 }
 
-function reviewerSessionId(): string {
-  return `ap-review-${randomUUID()}`;
+function createUuidV7(): string {
+  const bytes = randomBytes(16);
+  const timestamp = BigInt(Date.now());
+
+  bytes[0] = Number((timestamp >> 40n) & 0xffn);
+  bytes[1] = Number((timestamp >> 32n) & 0xffn);
+  bytes[2] = Number((timestamp >> 24n) & 0xffn);
+  bytes[3] = Number((timestamp >> 16n) & 0xffn);
+  bytes[4] = Number((timestamp >> 8n) & 0xffn);
+  bytes[5] = Number(timestamp & 0xffn);
+  bytes[6] = 0x70 | (bytes[6] & 0x0f);
+  bytes[8] = 0x80 | (bytes[8] & 0x3f);
+
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function reviewerSessionId(provider: string): string {
+  return provider === "openai-codex" ? createUuidV7() : `ap-review-${randomUUID()}`;
 }
 
 function loadNativeBashOptions(cwd: string, projectTrusted: boolean): { commandPrefix?: string; shellPath?: string } {
@@ -288,7 +305,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       throw new Error("compact review evidence exceeds the review model's safe context budget");
     }
 
-    const sessionId = base?.sessionId ?? reviewerSessionId();
+    const sessionId = base?.sessionId ?? reviewerSessionId(model.provider);
     const attemptGeneration = reviewerGeneration;
     activeReviewerSessionId = sessionId;
     const timeoutSignal = AbortSignal.timeout(config.reviewer?.timeoutMs ?? 30_000);
@@ -315,7 +332,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
           signal: reviewSignal,
           reasoning: config.reviewer?.reasoningEffort ?? "low",
           sessionId,
-          transport: "auto",
+          transport: model.provider === "openai-codex" ? "websocket" : "auto",
           cacheRetention: "long",
         },
       );

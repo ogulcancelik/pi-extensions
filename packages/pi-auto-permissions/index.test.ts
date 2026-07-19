@@ -310,6 +310,27 @@ describe("auto permissions tool gate", () => {
     expect(deltaEnvelope).toContain('"command": "git commit -m squash"');
   });
 
+  test("uses UUIDv7 and WebSocket routing for Codex reviewers", async () => {
+    const calls: Array<{ options: any }> = [];
+    completeOverride = async (_context, options) => {
+      calls.push({ options });
+      return reviewerResponse();
+    };
+    const state = harness(["push this branch"]);
+    state.ctx.model.provider = "openai-codex";
+
+    expect(await state.toolCallHandler(
+      { toolName: "bash", input: { command: "git push origin feature" } },
+      state.ctx,
+    )).toBeUndefined();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].options.sessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(calls[0].options.transport).toBe("websocket");
+  });
+
   test("resets to full evidence on branch, session, model, or API divergence", async () => {
     const scenarios = [
       (state: ReturnType<typeof harness>) => state.setBranch([

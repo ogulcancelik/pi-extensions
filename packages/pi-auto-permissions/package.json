@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-auto-permissions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Context-aware Bash permissions for Pi with automated guardian review.",
   "type": "module",
   "keywords": [
