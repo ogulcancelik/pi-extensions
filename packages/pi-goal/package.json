@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-goal",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Codex-style long-running goal mode for pi with automatic linked-session handoff.",
   "type": "module",
   "keywords": [
