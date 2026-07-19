@@ -28,7 +28,7 @@ Spaces mean exact spaces in an exact phrase. For unrelated concepts, the agent s
 
 ### `session_query`
 
-Deep-dives into a specific session file. Loads the conversation, sends it to an LLM, and answers your question about it.
+Deep-dives into a specific session file. Loads the conversation, sends it to an LLM, and answers your question about it. It includes user and assistant text plus tool calls, while omitting assistant thinking and tool results to keep queries efficient.
 
 For large sessions that exceed the model's context window, it uses smart windowing: keeps the first/last messages plus keyword-relevant sections, marking gaps with `[... N messages omitted ...]`.
 

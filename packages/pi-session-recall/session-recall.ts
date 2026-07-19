@@ -23,7 +23,13 @@
  *   session_query(path, "what approach did we take for X?")
  */
 
-import { complete, type Model, type Api, type Message } from "@earendil-works/pi-ai";
+import {
+	cleanupSessionResources,
+	complete,
+	type Model,
+	type Api,
+	type Message,
+} from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	getAgentDir,
@@ -45,6 +51,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -172,6 +179,63 @@ function snippetAround(text: string, keyword: string, radius = 100): string {
 /** Rough token estimate: ~4 chars per token */
 function estimateTokens(text: string): number {
 	return Math.ceil(text.length / 4);
+}
+
+/** Create a UUIDv7 for Codex request routing, which is unreliable with UUIDv4. */
+function createUuidV7(): string {
+	const bytes = randomBytes(16);
+	const timestamp = BigInt(Date.now());
+
+	bytes[0] = Number((timestamp >> 40n) & 0xffn);
+	bytes[1] = Number((timestamp >> 32n) & 0xffn);
+	bytes[2] = Number((timestamp >> 24n) & 0xffn);
+	bytes[3] = Number((timestamp >> 16n) & 0xffn);
+	bytes[4] = Number((timestamp >> 8n) & 0xffn);
+	bytes[5] = Number(timestamp & 0xffn);
+	bytes[6] = 0x70 | (bytes[6] & 0x0f);
+	bytes[8] = 0x80 | (bytes[8] & 0x3f);
+
+	const hex = bytes.toString("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function completeRecallRequest(
+	model: Model<Api>,
+	context: Parameters<typeof complete>[1],
+	options: NonNullable<Parameters<typeof complete>[2]>,
+): ReturnType<typeof complete> {
+	if (model.provider !== "openai-codex") return complete(model, context, options);
+
+	const sessionId = createUuidV7();
+	try {
+		return await complete(model, context, {
+			...options,
+			sessionId,
+			transport: "websocket",
+		});
+	} finally {
+		cleanupSessionResources(sessionId);
+	}
+}
+
+/**
+ * Keep the conversational record and actions while dropping the two largest,
+ * least useful sources of recall context: assistant thinking and tool output.
+ */
+function prepareRecallMessages(messages: Message[]): Message[] {
+	const prepared: Message[] = [];
+
+	for (const message of messages) {
+		if (message.role === "toolResult") continue;
+		if (message.role === "assistant") {
+			const content = message.content.filter((block) => block.type !== "thinking");
+			if (content.length > 0) prepared.push({ ...message, content });
+		} else {
+			prepared.push(message);
+		}
+	}
+
+	return prepared;
 }
 
 /**
@@ -795,7 +859,7 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 		label: (params) => `Session Query: ${params.question}`,
 		description:
 			"Query a specific session file to get detailed information. Use after session_search to dig into a particular session, " +
-			"or when you already have a session path (e.g., from a handoff). Sends the full conversation to an LLM for analysis.",
+			"or when you already have a session path (e.g., from a handoff). Sends the conversation and tool calls, without assistant thinking or tool output, to an LLM for analysis.",
 		renderResult: (result, options, theme) => {
 			const container = new Container();
 			const text = result.content?.[0]?.type === "text" ? result.content[0].text : "";
@@ -897,7 +961,7 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 			}
 
 			// Serialize and check if we need windowing
-			const llmMessages = convertToLlm(messages);
+			const llmMessages = prepareRecallMessages(convertToLlm(messages));
 			const fullText = serializeConversation(llmMessages);
 			const fullTokens = estimateTokens(fullText);
 
@@ -945,7 +1009,7 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 					timestamp: Date.now(),
 				};
 
-				const response = await complete(
+				const response = await completeRecallRequest(
 					queryModel,
 					{ systemPrompt: QUERY_SYSTEM_PROMPT, messages: [userMessage] },
 					{ apiKey: auth.apiKey, headers: auth.headers, signal },
@@ -960,9 +1024,17 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 					};
 				}
 
-				if (response.stopReason === "error" || response.content.length === 0) {
+				if (response.stopReason === "error") {
+					const providerError =
+						response.errorMessage?.trim() || "The provider returned an error without details.";
 					return errorResult(
-						`Error: LLM returned empty response (${response.stopReason}). Session may be too large even after windowing.`,
+						`Error querying ${queryModel.provider}/${queryModel.id}: ${providerError}`,
+					);
+				}
+
+				if (response.content.length === 0) {
+					return errorResult(
+						`Error querying ${queryModel.provider}/${queryModel.id}: LLM returned an empty response.`,
 					);
 				}
 
