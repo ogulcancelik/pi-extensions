@@ -14,7 +14,7 @@ function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
-record({ type: "started" });
+record({ type: "started", args: process.argv.slice(2) });
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
   const command = JSON.parse(line);

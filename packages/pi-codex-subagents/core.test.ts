@@ -94,6 +94,35 @@ describe("run storage", () => {
     fs.rmSync(legacyScope, { recursive: true, force: true });
   });
 
+  test("keeps agent lists in creation order when activity changes", async () => {
+    fs.rmSync(configFile, { force: true });
+    const parentSessionId = "creation-order";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    const now = Date.now();
+    const agents = [
+      { id: "11111111-1111-4111-8111-111111111111", taskName: "older", createdAt: now - 2000, lastActivity: now },
+      { id: "22222222-2222-4222-8222-222222222222", taskName: "newer", createdAt: now - 1000, lastActivity: now - 1000 },
+    ];
+    fs.mkdirSync(scope, { recursive: true });
+    for (const agent of agents) {
+      fs.writeFileSync(path.join(scope, `${agent.id}.info.json`), JSON.stringify({
+        ...agent,
+        canonicalName: `/${agent.taskName}`,
+        parentSessionId,
+        status: "completed",
+        updatedAt: agent.lastActivity,
+      }));
+    }
+
+    const manager = new AgentManager();
+    try {
+      expect(manager.listAgents(undefined, parentSessionId).map((agent) => agent.agent_name)).toEqual(["/newer", "/older"]);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+    }
+  });
+
   test("removes expired runs and outputs using configurable retention", () => {
     fs.mkdirSync(packageDir, { recursive: true });
     fs.rmSync(fixtureDir, { recursive: true, force: true });
@@ -189,6 +218,7 @@ function spawnParams(parentSessionId: string, task_name: string, message: string
 describe("child process lifecycle", () => {
   test("hibernates after settle and lazily restarts the persisted session", async () => {
     fs.rmSync(path.join(TEST_AGENT_DIR, "pi-codex-subagents", "config.json"), { force: true });
+    fs.rmSync(path.join(TEST_AGENT_DIR, "pi-codex-subagents", "SYSTEM.md"), { force: true });
     process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
     const parentSessionId = "lifecycle-settle";
     fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
@@ -214,7 +244,23 @@ describe("child process lifecycle", () => {
       expect(pidAlive(secondPid)).toBe(false);
       expect(manager.readAgentResponse("worker", parentSessionId).finalResponse).toBe("response:second");
       const sessionRecords = fs.readFileSync(first.sessionFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-      expect(new Set(sessionRecords.filter((entry) => entry.type === "started").map((entry) => entry.pid)).size).toBe(2);
+      const starts = sessionRecords.filter((entry) => entry.type === "started");
+      expect(new Set(starts.map((entry) => entry.pid)).size).toBe(2);
+      const systemPromptIndex = starts[0].args.indexOf("--system-prompt");
+      const systemPromptPath = starts[0].args[systemPromptIndex + 1];
+      expect(path.isAbsolute(systemPromptPath)).toBe(true);
+      expect(fs.readFileSync(systemPromptPath, "utf8")).toBe("You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.");
+      for (const start of starts) {
+        expect(start.args).toContain("--no-context-files");
+        expect(start.args.slice(start.args.indexOf("--system-prompt"), start.args.indexOf("--system-prompt") + 2)).toEqual([
+          "--system-prompt",
+          systemPromptPath,
+        ]);
+        expect(start.args.slice(start.args.indexOf("--append-system-prompt"), start.args.indexOf("--append-system-prompt") + 2)).toEqual([
+          "--append-system-prompt",
+          "",
+        ]);
+      }
     } finally {
       await manager.shutdown();
       fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
@@ -225,11 +271,17 @@ describe("child process lifecycle", () => {
   test("hibernates after failure while preserving the error", async () => {
     process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
     const parentSessionId = "lifecycle-failure";
+    const systemPromptFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "SYSTEM.md");
+    const customSystemPrompt = "Use the custom subagent instructions.";
     fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(systemPromptFile), { recursive: true });
+    fs.writeFileSync(systemPromptFile, customSystemPrompt);
     const manager = new AgentManager();
     try {
       await manager.spawnAgent(spawnParams(parentSessionId, "worker", "fail now"));
-      const pid = manager.getAgentInfo("worker", parentSessionId).childProcess!.pid;
+      const started = manager.getAgentInfo("worker", parentSessionId);
+      const pid = started.childProcess!.pid;
+      expect(fs.readFileSync(systemPromptFile, "utf8")).toBe(customSystemPrompt);
       await waitUntil(() => {
         const info = manager.getAgentInfo("worker", parentSessionId);
         return info.status === "failed" && !info.childProcess;
@@ -240,7 +292,23 @@ describe("child process lifecycle", () => {
     } finally {
       await manager.shutdown();
       fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
+      fs.rmSync(systemPromptFile, { force: true });
       delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
+  test("rejects an empty configured system prompt instead of falling back to Pi's default", async () => {
+    const parentSessionId = "empty-system-prompt";
+    const systemPromptFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "SYSTEM.md");
+    fs.mkdirSync(path.dirname(systemPromptFile), { recursive: true });
+    fs.writeFileSync(systemPromptFile, "\n");
+    const manager = new AgentManager();
+    try {
+      await expect(manager.spawnAgent(spawnParams(parentSessionId, "worker", "first"))).rejects.toThrow("Subagent system prompt is empty");
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
+      fs.rmSync(systemPromptFile, { force: true });
     }
   });
 

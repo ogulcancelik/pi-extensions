@@ -11,6 +11,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 export const PACKAGE_BASENAME = "pi-codex-subagents";
 export const SUBAGENT_DIR = path.join(getAgentDir(), PACKAGE_BASENAME);
 const CONFIG_PATH = path.join(SUBAGENT_DIR, "config.json");
+const SYSTEM_PROMPT_PATH = path.join(SUBAGENT_DIR, "SYSTEM.md");
 const AGENTS_DIR = path.join(SUBAGENT_DIR, "agents");
 const TEMP_ROOT = path.join(process.env.PI_SUBAGENT_TEMP_DIR || os.tmpdir(), PACKAGE_BASENAME, os.userInfo().username);
 const LEGACY_RUNS_DIR = path.join(TEMP_ROOT, "runs");
@@ -20,6 +21,7 @@ export const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 export const DEFAULT_RETENTION_DAYS = 7;
 export const DEFAULT_THINKING = "high";
 export const DEFAULT_TOOLS = "read,bash,grep,find,ls";
+const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const FINAL_STATUSES = new Set<AgentRuntimeStatus>(["completed", "failed", "interrupted"]);
@@ -229,8 +231,25 @@ function ensurePrivateDir(directory: string, enforceMode = false): void {
   if (process.platform !== "win32" && (enforceMode || !existed)) fs.chmodSync(directory, 0o700);
 }
 
+function ensureSystemPromptFile(): void {
+  if (fs.existsSync(SYSTEM_PROMPT_PATH)) return;
+  try {
+    fs.writeFileSync(SYSTEM_PROMPT_PATH, DEFAULT_SUBAGENT_SYSTEM_PROMPT, { flag: "wx", mode: 0o600 });
+  } catch (error: any) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+}
+
+function readSystemPrompt(): string {
+  ensureSystemPromptFile();
+  const prompt = fs.readFileSync(SYSTEM_PROMPT_PATH, "utf8");
+  if (!prompt.trim()) throw new Error(`Subagent system prompt is empty: ${SYSTEM_PROMPT_PATH}`);
+  return prompt;
+}
+
 function ensureBaseDirs(): void {
   fs.mkdirSync(AGENTS_DIR, { recursive: true });
+  ensureSystemPromptFile();
   ensurePrivateDir(getRunsDir(), !loadSubagentConfig().storageDir);
   ensurePrivateDir(SOCKET_DIR, true);
 }
@@ -373,7 +392,7 @@ function readInfos(directory: string): AgentInfo[] {
 }
 
 function sortInfos(infos: AgentInfo[]): AgentInfo[] {
-  return infos.sort((a, b) => (b.lastActivity ?? b.updatedAt ?? b.createdAt) - (a.lastActivity ?? a.updatedAt ?? a.createdAt));
+  return infos.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
 }
 
 function readScopeInfos(parentSessionId: string): AgentInfo[] {
@@ -923,6 +942,7 @@ export class AgentManager {
     const provider = definition?.provider && definition.model ? definition.provider : params.inheritedProvider;
     const modelId = definition?.provider && definition.model ? definition.model : params.inheritedModelId;
     const config = loadSubagentConfig();
+    readSystemPrompt();
     const configuredSkills = definition?.skills ?? config.defaults?.skills;
     const skills = normalizeList([...(configuredSkills ?? []), ...(params.skills ?? [])]);
     const extensions = normalizeList(definition?.extensions ?? config.defaults?.extensions);
@@ -994,6 +1014,7 @@ export class AgentManager {
   }
 
   private async startLiveAgent(info: AgentInfo, initialMessage?: string, displayMessage?: string): Promise<LiveAgent> {
+    readSystemPrompt();
     const logger = new SessionLogger(info.logFile);
     const broadcaster = new EventBroadcaster(info.id);
     broadcaster.start();
@@ -1004,6 +1025,9 @@ export class AgentManager {
       "--no-extensions",
       "--no-skills",
       "--no-prompt-templates",
+      "--no-context-files",
+      "--system-prompt", SYSTEM_PROMPT_PATH,
+      "--append-system-prompt", "",
       "--provider", info.provider,
       "--model", info.modelId,
       "--session", info.sessionFile,

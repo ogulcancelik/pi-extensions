@@ -61,7 +61,7 @@ You are a focused review subagent. Return concise findings with file paths.
 
 When a template loads extensions but omits `tools`, the child uses Pi's normal tool activation so tools registered by those extensions are available. Set template `tools` when you want an explicit allowlist. Without configured extensions, omitted template tools inherit the parent's active tool names as before.
 
-Automatic extension, skill, and prompt-template discovery is disabled in children. Only explicitly configured skills and extensions load. If the inherited parent model comes from an extension-registered provider, add that provider extension to the selected template; otherwise the isolated child cannot resolve the provider.
+Automatic extension, skill, prompt-template, and context-file discovery is disabled in children. `AGENTS.md` and `CLAUDE.md` files are never loaded. Each child replaces Pi's default coding prompt with the contents of `~/.pi/agent/pi-codex-subagents/SYSTEM.md`, while only explicitly configured skills and extensions load. This file is created with a minimal subagent prompt when the extension first loads and can be edited directly. If the inherited parent model comes from an extension-registered provider, add that provider extension to the selected template; otherwise the isolated child cannot resolve the provider.
 
 ## Configuration
 
