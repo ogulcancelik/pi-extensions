@@ -1,7 +1,7 @@
 {
   "name": "@ogulcancelik/pi-herdr",
-  "version": "0.3.0",
-  "description": "Herdr-native orchestration and current CLI skill for pi.",
+  "version": "0.4.0",
+  "description": "Pi-native tools for controlling Herdr layouts, panes, and coding agents.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -39,14 +39,10 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ],
-    "skills": [
-      "./skills"
     ]
   },
   "files": [
     "index.ts",
-    "skills",
     "README.md",
     "LICENSE"
   ]

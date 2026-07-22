@@ -3,35 +3,50 @@ import herdrExtension from "./index";
 
 const currentPane = {
 	pane_id: "w1:p1",
-	terminal_id: "term_current",
 	workspace_id: "w1",
 	tab_id: "w1:t1",
 	focused: false,
 	cwd: "/repo",
+	foreground_cwd: "/repo",
 	agent: "pi",
 	agent_status: "working",
-	revision: 1,
 };
 
-function response(result: unknown) {
-	return { stdout: JSON.stringify({ id: "test", result }), stderr: "", code: 0, killed: false };
+const reviewer = {
+	name: "reviewer",
+	agent: "codex",
+	display_agent: "Codex",
+	agent_status: "idle",
+	workspace_id: "w1",
+	tab_id: "w1:t1",
+	pane_id: "w1:p2",
+	focused: false,
+	cwd: "/repo",
+};
+
+function response(result: unknown, stdout?: string) {
+	return {
+		stdout: stdout ?? JSON.stringify({ id: "test", result }),
+		stderr: "",
+		code: 0,
+		killed: false,
+	};
 }
 
-function registerTool(handler: (args: string[]) => unknown) {
-	let tool: any;
+function registerTools(handler: (args: string[]) => unknown | string) {
+	const tools = new Map<string, any>();
 	const pi = {
-		on() {},
-		registerTool(definition: unknown) {
-			tool = definition;
+		registerTool(definition: any) {
+			tools.set(definition.name, definition);
 		},
 		async exec(command: string, args: string[]) {
 			expect(command).toBe("herdr");
-			return response(handler(args));
+			const result = handler(args);
+			return typeof result === "string" ? response(undefined, result) : response(result);
 		},
 	};
 	herdrExtension(pi as any);
-	if (!tool) throw new Error("herdr tool was not registered");
-	return tool;
+	return tools;
 }
 
 beforeEach(() => {
@@ -45,33 +60,26 @@ afterEach(() => {
 });
 
 describe("pi-herdr", () => {
-	test("does not register outside Herdr", () => {
+	test("registers only inside Herdr", () => {
 		delete process.env.HERDR_ENV;
-		let registered = false;
-		herdrExtension({ registerTool: () => { registered = true; } } as any);
-		expect(registered).toBeFalse();
+		const tools = registerTools(() => ({}));
+		expect(tools.size).toBe(0);
 	});
 
-	test("resolves the caller pane through pane current", async () => {
-		const calls: string[][] = [];
-		const tool = registerTool((args) => {
-			calls.push(args);
-			return { type: "pane_current", pane: currentPane };
-		});
-
-		const result = await tool.execute("test", { action: "current" }, undefined, undefined, {});
-
-		expect(calls).toEqual([["pane", "current", "--current"]]);
-		expect(result.details.pane.pane_id).toBe(currentPane.pane_id);
+	test("registers separate layout, pane, and agent primitives", () => {
+		const tools = registerTools(() => ({}));
+		expect([...tools.keys()]).toEqual(["herdr_layout", "herdr_pane", "herdr_agent"]);
+		expect(tools.get("herdr_layout").description).toContain("Workspaces contain tabs; tabs contain panes");
+		expect(tools.get("herdr_pane").description).toContain("ordinary processes");
+		expect(tools.get("herdr_agent").description).toContain("existing Herdr pane");
 	});
 
-	test("chooses split direction from geometry and labels the pane", async () => {
+	test("splits the caller pane from geometry while preserving cwd and focus", async () => {
 		const calls: string[][] = [];
-		const splitPane = { ...currentPane, pane_id: "w1:p2", terminal_id: "term_split", agent_status: "unknown" };
-		const tool = registerTool((args) => {
+		const splitPane = { ...currentPane, pane_id: "w1:p2", agent: undefined, agent_status: "unknown" };
+		const tools = registerTools((args) => {
 			calls.push(args);
 			if (args[0] === "pane" && args[1] === "current") return { type: "pane_current", pane: currentPane };
-			if (args[0] === "pane" && args[1] === "get") return { type: "pane_info", pane: currentPane };
 			if (args[0] === "pane" && args[1] === "layout") {
 				return {
 					type: "pane_layout",
@@ -87,84 +95,175 @@ describe("pi-herdr", () => {
 				};
 			}
 			if (args[0] === "pane" && args[1] === "split") return { type: "pane_info", pane: splitPane };
-			if (args[0] === "pane" && args[1] === "rename") return { type: "pane_info", pane: { ...splitPane, label: "reviewer" } };
 			throw new Error(`unexpected command: ${args.join(" ")}`);
 		});
 
-		const result = await tool.execute(
+		const result = await tools.get("herdr_layout").execute(
 			"test",
-			{ action: "pane_split", newPane: "reviewer" },
+			{ action: "pane_split" },
 			undefined,
 			undefined,
 			{},
 		);
 
 		expect(calls).toContainEqual(["pane", "layout", "--pane", "w1:p1"]);
-		expect(calls).toContainEqual(["pane", "split", "w1:p1", "--direction", "right", "--no-focus"]);
-		expect(calls).toContainEqual(["pane", "rename", "w1:p2", "reviewer"]);
-		expect(result.details.newPaneId).toBe("w1:p2");
+		expect(calls).toContainEqual([
+			"pane",
+			"split",
+			"w1:p1",
+			"--direction",
+			"right",
+			"--cwd",
+			"/repo",
+			"--no-focus",
+		]);
+		expect(result.details.pane.pane_id).toBe("w1:p2");
 	});
 
-	test("focuses the exact pane through agent focus", async () => {
+	test("waits for ordinary output through pane wait-output", async () => {
 		const calls: string[][] = [];
-		const tool = registerTool((args) => {
+		const tools = registerTools((args) => {
 			calls.push(args);
-			if (args[1] === "current") return { type: "pane_current", pane: currentPane };
-			if (args[1] === "get") return { type: "pane_info", pane: currentPane };
-			if (args[0] === "agent" && args[1] === "focus") {
-				return { type: "agent_info", agent: { ...currentPane, name: "main", terminal_id: "term_current" } };
-			}
-			throw new Error(`unexpected command: ${args.join(" ")}`);
+			return {
+				type: "pane_output_matched",
+				pane_id: "w1:p2",
+				matched_line: "server ready",
+				read: { text: "booting\nserver ready\n" },
+			};
 		});
 
-		await tool.execute("test", { action: "focus", pane: "w1:p1" }, undefined, undefined, {});
-
-		expect(calls).toContainEqual(["agent", "focus", "w1:p1"]);
-	});
-
-	test("keeps aliases usable across workspaces", async () => {
-		const calls: string[][] = [];
-		const remotePane = {
-			...currentPane,
-			pane_id: "w2:p1",
-			terminal_id: "term_remote",
-			workspace_id: "w2",
-			tab_id: "w2:t1",
-			agent_status: "idle",
-		};
-		const remoteWorkspace = {
-			workspace_id: "w2",
-			number: 2,
-			label: "remote",
-			focused: false,
-			pane_count: 1,
-			tab_count: 1,
-			active_tab_id: "w2:t1",
-			agent_status: "idle",
-		};
-		const tool = registerTool((args) => {
-			calls.push(args);
-			if (args[0] === "pane" && args[1] === "current") return { type: "pane_current", pane: currentPane };
-			if (args[0] === "workspace" && args[1] === "create") {
-				return { type: "workspace_created", workspace: remoteWorkspace, root_pane: remotePane };
-			}
-			if (args[0] === "pane" && args[1] === "get") return { type: "pane_info", pane: remotePane };
-			if (args[0] === "agent" && args[1] === "focus") {
-				return { type: "agent_info", agent: { ...remotePane, name: "remote" } };
-			}
-			throw new Error(`unexpected command: ${args.join(" ")}`);
-		});
-
-		await tool.execute(
-			"create",
-			{ action: "workspace_create", label: "remote", pane: "remote" },
+		const result = await tools.get("herdr_pane").execute(
+			"test",
+			{ action: "wait_output", pane: "w1:p2", match: "ready", timeout: 30000 },
 			undefined,
 			undefined,
 			{},
 		);
-		await tool.execute("focus", { action: "focus", pane: "remote" }, undefined, undefined, {});
 
-		expect(calls).toContainEqual(["pane", "get", "w2:p1"]);
-		expect(calls).toContainEqual(["agent", "focus", "w2:p1"]);
+		expect(calls).toEqual([["pane", "wait-output", "w1:p2", "--match", "ready", "--timeout", "30000"]]);
+		expect(result.content[0].text).toContain("server ready");
+	});
+
+	test("refuses to close the caller pane", async () => {
+		const tools = registerTools((args) => {
+			if (args[0] === "pane" && args[1] === "current") return { type: "pane_current", pane: currentPane };
+			throw new Error(`unexpected command: ${args.join(" ")}`);
+		});
+
+		expect(
+			tools.get("herdr_pane").execute(
+				"test",
+				{ action: "close", pane: "w1:p1" },
+				undefined,
+				undefined,
+				{},
+			),
+		).rejects.toThrow("Refusing to close");
+	});
+
+	test("starts a named agent in an existing pane", async () => {
+		const calls: string[][] = [];
+		const tools = registerTools((args) => {
+			calls.push(args);
+			return { type: "agent_started", agent: reviewer, argv: ["codex", "-m", "gpt-5.4"] };
+		});
+
+		const result = await tools.get("herdr_agent").execute(
+			"test",
+			{
+				action: "start",
+				name: "reviewer",
+				kind: "codex",
+				pane: "w1:p2",
+				agentArgs: ["-m", "gpt-5.4"],
+			},
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toEqual([
+			["agent", "start", "reviewer", "--kind", "codex", "--pane", "w1:p2", "--", "-m", "gpt-5.4"],
+		]);
+		expect(result.details.agent.name).toBe("reviewer");
+	});
+
+	test("prompts through the agent surface and waits by default", async () => {
+		const calls: string[][] = [];
+		const tools = registerTools((args) => {
+			calls.push(args);
+			return { type: "agent_prompted", agent: { ...reviewer, agent_status: "done" } };
+		});
+
+		const result = await tools.get("herdr_agent").execute(
+			"test",
+			{
+				action: "prompt",
+				target: "reviewer",
+				prompt: "Review the current diff",
+				until: ["idle", "done"],
+				timeout: 120000,
+			},
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toEqual([
+			[
+				"agent",
+				"prompt",
+				"reviewer",
+				"Review the current diff",
+				"--wait",
+				"--until",
+				"idle",
+				"--until",
+				"done",
+				"--timeout",
+				"120000",
+			],
+		]);
+		expect(result.details.agent.agent_status).toBe("done");
+	});
+
+	test("reads through the resolved agent surface", async () => {
+		const calls: string[][] = [];
+		const tools = registerTools((args) => {
+			calls.push(args);
+			return "review complete\n";
+		});
+
+		const result = await tools.get("herdr_agent").execute(
+			"test",
+			{ action: "read", target: "reviewer", lines: 120 },
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toEqual([
+			["agent", "read", "reviewer", "--source", "recent-unwrapped", "--lines", "120"],
+		]);
+		expect(result.content[0].text).toBe("review complete\n");
+	});
+
+	test("sends validated keys without expecting agent data in the response", async () => {
+		const calls: string[][] = [];
+		const tools = registerTools((args) => {
+			calls.push(args);
+			return { type: "ok" };
+		});
+
+		const result = await tools.get("herdr_agent").execute(
+			"test",
+			{ action: "send_keys", target: "reviewer", keys: ["esc", "ctrl+c"] },
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toEqual([["agent", "send-keys", "reviewer", "esc", "ctrl+c"]]);
+		expect(result.content[0].text).toBe("Sent esc ctrl+c to reviewer");
 	});
 });

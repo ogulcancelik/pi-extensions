@@ -14,7 +14,7 @@ This is my working collection rather than a single polished suite. Some extensio
 | [pi-quit-and-delete](packages/pi-quit-and-delete) | Keyboard shortcut to quit pi and permanently delete the active session file | 🟠 Moderate |
 | [pi-ssh-tools](packages/pi-ssh-tools) | Toggle explicit SSH tools on demand via `/ssh` without replacing local tools | 🟠 Moderate |
 | [pi-fork-plus](packages/pi-fork-plus) | Fork from the session tree, including editable assistant-message forks | 🧪 Experimental |
-| [pi-herdr](packages/pi-herdr) | Herdr-native pane, tab, and workspace orchestration for long-running workflows | 🧪 Experimental |
+| [pi-herdr](packages/pi-herdr) | Pi-native tools for Herdr layouts, terminal panes, and coding agents | 🧪 Experimental |
 | [pi-model-agents](packages/pi-model-agents) | Load model-specific AGENTS.md instructions based on the active pi model | 🧪 Experimental |
 | [pi-model-thinking](packages/pi-model-thinking) | Auto-set and remember thinking levels per model | 🧪 Experimental |
 | [pi-ghost](packages/pi-ghost) | Ephemeral side conversation overlay — open a temporary ghost session inside the current pi UI | ⚪ Very rare |
