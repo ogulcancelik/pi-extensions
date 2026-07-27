@@ -4,7 +4,7 @@
  * Custom footer with context gauge + subscription usage bars.
  * Auto-detects provider from current model and shows relevant usage.
  *
- * Supports: Claude Max, Codex, Copilot, Gemini, MiniMax Token Plan, Kimi Coding
+ * Supports: Claude Max, Codex, Copilot, Gemini, MiniMax Token Plan, Kimi Coding, xAI/Grok
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -265,6 +265,24 @@ function getMinimaxToken(provider: "minimax" | "minimax-cn"): string | undefined
 
 function getKimiToken(): string | undefined {
   return getApiKey("kimi-coding", "KIMI_API_KEY");
+}
+
+function getXaiToken(): string | undefined {
+  // Prefer OAuth access from /login xai (subscription), then API key / env.
+  const auth = loadAuthJson();
+  const entry = auth.xai;
+  if (entry) {
+    if (typeof entry === "string") {
+      const resolved = resolveAuthValue(entry);
+      if (resolved) return resolved;
+    } else {
+      const oauth = resolveAuthValue(entry.access);
+      if (oauth) return oauth;
+      const key = resolveAuthValue(entry.key);
+      if (key) return key;
+    }
+  }
+  return getApiKey("xai", "XAI_API_KEY");
 }
 
 // ============ Time Formatting ============
@@ -706,6 +724,69 @@ async function fetchKimiUsage(): Promise<UsageSnapshot> {
   }
 }
 
+async function fetchXaiUsage(): Promise<UsageSnapshot> {
+  const token = getXaiToken();
+  if (!token) {
+    return { provider: "Grok", windows: [], error: "no-auth", fetchedAt: Date.now() };
+  }
+
+  try {
+    // Subscription weekly credit quota (same surface as Grok Build /usage via cli-chat-proxy).
+    const res = await fetchWithTimeout("https://cli-chat-proxy.grok.com/v1/billing?format=credits", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        "User-Agent": "pi-minimal-footer",
+      },
+    });
+
+    if (!res.ok) {
+      return { provider: "Grok", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+    }
+
+    const data = (await res.json()) as any;
+    const config = data?.config ?? data;
+    const windows: RateWindow[] = [];
+
+    const period = config?.currentPeriod;
+    const periodEnd =
+      period?.end || config?.billingPeriodEnd || config?.billing_period_end;
+    const resetsIn = periodEnd ? formatResetTime(new Date(periodEnd)) : undefined;
+
+    const creditPct = Number(config?.creditUsagePercent);
+    if (Number.isFinite(creditPct)) {
+      windows.push({
+        label: "Week",
+        usedPercent: clampPercent(creditPct),
+        resetsIn,
+      });
+    }
+
+    // Fallback: dollar-style monthly billing if credits format is unavailable.
+    if (windows.length === 0) {
+      const used = Number(config?.used?.val ?? config?.used);
+      const limit = Number(config?.monthlyLimit?.val ?? config?.monthlyLimit);
+      if (Number.isFinite(used) && Number.isFinite(limit) && limit > 0) {
+        const end = config?.billingPeriodEnd;
+        windows.push({
+          label: "Month",
+          usedPercent: clampPercent((used / limit) * 100),
+          resetsIn: end ? formatResetTime(new Date(end)) : undefined,
+        });
+      }
+    }
+
+    if (windows.length === 0) {
+      return { provider: "Grok", windows: [], error: "no-usage-data", fetchedAt: Date.now() };
+    }
+
+    return { provider: "Grok", windows, fetchedAt: Date.now() };
+  } catch (e) {
+    return { provider: "Grok", windows: [], error: String(e), fetchedAt: Date.now() };
+  }
+}
+
 // ============ Provider Detection ============
 
 // Map pi provider names to our internal usage provider keys
@@ -717,6 +798,9 @@ const PROVIDER_MAP: Record<string, string> = {
   minimax: "minimax", // MiniMax Token Plan / Coding Plan
   "minimax-cn": "minimax-cn", // MiniMax China plan
   "kimi-coding": "kimi-coding", // Kimi plan
+  xai: "xai", // xAI / Grok subscription (OAuth or API key)
+  "xai-grok-build": "xai", // optional Grok Build provider extension id
+  "grok-cli": "xai", // pi-grok-cli provider id
 };
 
 function detectProvider(modelProvider: string): string | null {
@@ -739,6 +823,8 @@ async function fetchUsageForProvider(provider: string): Promise<UsageSnapshot> {
       return fetchMinimaxUsage("minimax-cn");
     case "kimi-coding":
       return fetchKimiUsage();
+    case "xai":
+      return fetchXaiUsage();
     default:
       return { provider: "Unknown", windows: [], error: "unknown-provider", fetchedAt: Date.now() };
   }

@@ -24,6 +24,7 @@ Minimal footer for [pi](https://github.com/earendil-works/pi) that replaces the 
 | MiniMax        | 5h + weekly rolling windows (Token Plan, credit-based)  |
 | MiniMax CN     | Same as MiniMax, China endpoint                        |
 | Kimi Coding    | 5h + weekly rolling windows (Plan)                     |
+| xAI / Grok     | Weekly credit window + time until reset                |
 
 ## Install
 
@@ -69,5 +70,6 @@ Anthropic's OAuth usage endpoint (`/api/oauth/usage`) has been returning persist
 ## Notes
 
 - Replaces the default pi footer entirely via `ctx.ui.setFooter()`
-- Auth tokens are read from `~/.pi/agent/auth.json` (populated by `/login`) or standard env vars (`ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`, etc.)
+- Auth tokens are read from `~/.pi/agent/auth.json` (populated by `/login`) or standard env vars (`ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`, `XAI_API_KEY`, etc.)
+- xAI/Grok usage uses OAuth from `/login xai` (or `XAI_API_KEY`) against `cli-chat-proxy.grok.com` weekly billing
 - Providers without auth simply don't show a usage bar — no errors
