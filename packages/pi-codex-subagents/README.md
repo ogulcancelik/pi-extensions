@@ -86,7 +86,7 @@ Optional configuration lives at:
 
 Configuration is read when agents spawn, while cleanup runs when the extension loads. Restart Pi after changing `storageDir` or `retentionDays` so storage lookup and cleanup use the same configuration throughout the process.
 
-Template skills and extensions override configured defaults. Skills explicitly requested by the parent are added to configured template/default skills. Tool selection belongs to the template or is inherited from the parent.
+Template skills and extensions override configured defaults. Skills explicitly requested by the parent are added to configured template/default skills. Tool selection belongs to the template or is inherited from the parent. A `model` requested by the parent as one `provider/model-id` argument, and a requested `thinking` level, override the template and the inherited values, so one task can run on another provider without a template.
 
 ## Completion delivery
 

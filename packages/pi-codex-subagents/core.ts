@@ -23,7 +23,7 @@ export const DEFAULT_THINKING = "high";
 export const DEFAULT_TOOLS = "read,bash,grep,find,ls";
 const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.";
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const FINAL_STATUSES = new Set<AgentRuntimeStatus>(["completed", "failed", "interrupted"]);
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -121,6 +121,9 @@ export interface SpawnAgentParams {
   inheritedModelId: string;
   inheritedThinking?: ThinkingLevel;
   inheritedTools?: string;
+  provider?: string;
+  modelId?: string;
+  thinking?: ThinkingLevel;
 }
 
 interface PendingRequest {
@@ -977,8 +980,11 @@ export class AgentManager {
     const taskName = normalizeTaskName(params.task_name);
     const definition = getAgentDefinition(params.agent_type);
     if (params.agent_type && !definition) throw new Error(`Agent template not found: ${params.agent_type}`);
-    const provider = definition?.provider && definition.model ? definition.provider : params.inheritedProvider;
-    const modelId = definition?.provider && definition.model ? definition.model : params.inheritedModelId;
+    if (Boolean(params.provider) !== Boolean(params.modelId)) throw new Error("Model override needs both provider and modelId.");
+    const callerModel = params.provider && params.modelId;
+    const templateModel = definition?.provider && definition.model;
+    const provider = callerModel ? params.provider! : templateModel ? definition!.provider! : params.inheritedProvider;
+    const modelId = callerModel ? params.modelId! : templateModel ? definition!.model! : params.inheritedModelId;
     const config = loadSubagentConfig();
     readSystemPrompt();
     const configuredSkills = definition?.skills ?? config.defaults?.skills;
@@ -989,7 +995,7 @@ export class AgentManager {
       : extensions?.length
         ? undefined
         : normalizeTools(params.inheritedTools);
-    const thinking = definition?.thinking ?? params.inheritedThinking ?? DEFAULT_THINKING;
+    const thinking = params.thinking ?? definition?.thinking ?? params.inheritedThinking ?? DEFAULT_THINKING;
     const cwd = path.resolve(params.cwd);
     const directory = scopeDir(params.parentSessionId);
     ensurePrivateDir(directory, true);

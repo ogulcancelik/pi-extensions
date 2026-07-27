@@ -5,11 +5,13 @@ import {
   formatSize,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   AgentManager,
   getAgentDefinitionsDescription,
+  THINKING_LEVELS,
   type AgentCompletionEvent,
   type AgentInfo,
   type ThinkingLevel,
@@ -79,6 +81,17 @@ export default function (pi: ExtensionAPI) {
   let cachedSkillsSignature = "";
   let activeContext: any;
   const activeAgents = new Set<string>();
+
+  let cachedProviders = "";
+
+  const availableProviders = (registry?: any): string =>
+    [...new Set((registry?.getAvailable?.() ?? []).map((model: any) => model.provider))].join(", ");
+
+  const providerModelIds = (registry: any, provider: string): string[] =>
+    (registry?.getAvailable?.() ?? []).filter((model: any) => model.provider === provider).map((model: any) => model.id);
+
+  const isAvailableModel = (registry: any, provider: string, modelId: string): boolean =>
+    (registry?.getAvailable?.() ?? []).some((model: any) => model.provider === provider && model.id === modelId);
 
   const isCurrentSession = (parentId: string) => {
     try { return activeContext && parentSessionId(activeContext) === parentId; }
@@ -161,8 +174,13 @@ Returns after the child accepts its initial task. Continue with independent work
 
 \`agent_type\` is optional. Omit it for a generic subagent. Use a template only when the task matches it.
 
+\`model\` and \`thinking\` are optional. Both override the template and the parent settings. Use \`model\` when another provider suits the task better, such as an independent review.
+
 Available agent templates:
 ${getAgentDefinitionsDescription()}
+
+Available model providers for \`model\`, written as provider/model-id:
+${cachedProviders || "No providers detected. Omit model to inherit the parent model."}
 
 Available parent skills that may be added by name:
 ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${skill.description}`).join("\n") : "No model-invocable skills are loaded in the parent session."}`;
@@ -172,6 +190,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
       message: Type.String({ description: "Initial task for the new agent." }),
       agent_type: Type.Optional(Type.String({ description: "Optional agent template name from ~/.pi/agent/pi-codex-subagents/agents/." })),
       skills: Type.Optional(Type.Array(Type.String(), { description: "Additional skill names from the loaded parent skills listed in this tool description." })),
+      model: Type.Optional(Type.String({ description: "Optional provider/model-id pair such as openai-codex/gpt-5.6-sol. Defaults to the template model, otherwise the parent model." })),
+      thinking: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Optional thinking level. Defaults to the template level, otherwise the parent level." })),
     }),
     async execute(_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
       const currentModel = ctx.model;
@@ -180,6 +200,18 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
       const loadedSkillPaths = Object.fromEntries(cachedSkills.map((skill) => [skill.name, skill.filePath]));
       const unavailableSkills = requestedSkills.filter((skill) => !Object.hasOwn(loadedSkillPaths, skill));
       if (unavailableSkills.length) throw new Error(`spawn_agent failed: skills are not loaded in the parent session: ${unavailableSkills.join(", ")}`);
+      let override: { provider: string; modelId: string } | undefined;
+      if (params.model) {
+        const slash = String(params.model).indexOf("/");
+        if (slash < 1) throw new Error(`spawn_agent failed: model must be "provider/model-id", got "${params.model}".`);
+        const provider = params.model.slice(0, slash);
+        const modelId = params.model.slice(slash + 1);
+        if (!isAvailableModel(ctx.modelRegistry, provider, modelId)) {
+          const known = providerModelIds(ctx.modelRegistry, provider);
+          throw new Error(`spawn_agent failed: unknown model "${params.model}". ${known.length ? `Model ids for ${provider}: ${known.join(", ")}` : `Available providers: ${availableProviders(ctx.modelRegistry) || "none"}`}`);
+        }
+        override = { provider, modelId };
+      }
       try {
         const result = await manager.spawnAgent({
           task_name: params.task_name,
@@ -194,6 +226,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
           inheritedModelId: currentModel.id,
           inheritedThinking: pi.getThinkingLevel() as ThinkingLevel,
           inheritedTools: pi.getActiveTools().join(","),
+          ...override,
+          thinking: params.thinking,
         });
         return textResult(`Spawned ${result.task_name}.`, result);
       } catch (error) {
@@ -201,7 +235,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
       }
     },
     renderCall(args: any, theme: Theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("spawn_agent ")) + theme.fg("accent", args.task_name || "?") + theme.fg("dim", args.agent_type ? ` [${args.agent_type}]` : ""), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("spawn_agent ")) + theme.fg("accent", args.task_name || "?") + theme.fg("dim", (args.agent_type ? ` [${args.agent_type}]` : "") + (args.model ? ` ${args.model}` : "")), 0, 0);
     },
     renderResult(result: any, _options: any, theme: Theme) {
       if (result.isError) return new Text(theme.fg("error", `✗ ${result.content?.[0]?.text || "failed"}`), 0, 0);
@@ -220,16 +254,18 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     refreshAgentWidget();
   });
 
-  pi.on("before_agent_start", async (event: any) => {
+  pi.on("before_agent_start", async (event: any, ctx: any) => {
+    const providers = availableProviders(ctx?.modelRegistry);
     const skills = event?.systemPromptOptions?.skills;
     const nextSkills = Array.isArray(skills)
       ? skills
           .filter((skill: any) => !skill?.disableModelInvocation && typeof skill?.name === "string" && typeof skill?.filePath === "string")
           .map((skill: any) => ({ name: skill.name, description: String(skill.description || ""), filePath: skill.filePath }))
       : [];
-    const signature = JSON.stringify(nextSkills);
+    const signature = JSON.stringify([nextSkills, providers]);
     if (signature !== cachedSkillsSignature) {
       cachedSkills = nextSkills;
+      cachedProviders = providers;
       cachedSkillsSignature = signature;
       pi.registerTool(spawnAgentTool);
     }

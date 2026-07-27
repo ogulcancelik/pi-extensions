@@ -218,6 +218,56 @@ function spawnParams(parentSessionId: string, task_name: string, message: string
   };
 }
 
+describe("spawn overrides", () => {
+  test("caller model/thinking win over inherited values", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "spawn-overrides";
+    fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent({ ...spawnParams(parentSessionId, "reviewer", "review"), inheritedThinking: "low", provider: "openai", modelId: "gpt-5", thinking: "xhigh" });
+      expect(manager.getAgentInfo("reviewer", parentSessionId)).toMatchObject({ provider: "openai", modelId: "gpt-5", model: "openai:gpt-5", thinking: "xhigh" });
+      await manager.spawnAgent({ ...spawnParams(parentSessionId, "plain", "work"), inheritedThinking: "low" });
+      expect(manager.getAgentInfo("plain", parentSessionId)).toMatchObject({ model: "test:fake", thinking: "low" });
+      await manager.spawnAgent({ ...spawnParams(parentSessionId, "model-only", "work"), inheritedThinking: "low", provider: "openai", modelId: "gpt-5" });
+      expect(manager.getAgentInfo("model-only", parentSessionId)).toMatchObject({ model: "openai:gpt-5", thinking: "low" });
+      await manager.spawnAgent({ ...spawnParams(parentSessionId, "thinking-only", "work"), inheritedThinking: "low", thinking: "max" });
+      expect(manager.getAgentInfo("thinking-only", parentSessionId)).toMatchObject({ model: "test:fake", thinking: "max" });
+      await expect(manager.spawnAgent({ ...spawnParams(parentSessionId, "half", "work"), provider: "openai" })).rejects.toThrow("needs both provider and modelId");
+    } finally {
+      await manager.shutdown();
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
+  test("caller overrides beat a template, and each unset field falls back", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "spawn-overrides-template";
+    fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
+    const templateFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", "routed.md");
+    fs.mkdirSync(path.dirname(templateFile), { recursive: true });
+    fs.writeFileSync(templateFile, "---\nname: routed\nprovider: template-provider\nmodel: template-model\nthinking: medium\n---\nRouted template.");
+    const manager = new AgentManager();
+    const spawn = async (task: string, overrides: Record<string, unknown>) => {
+      await manager.spawnAgent({ ...spawnParams(parentSessionId, task, "work"), agent_type: "routed", inheritedThinking: "low", ...overrides });
+      return manager.getAgentInfo(task, parentSessionId);
+    };
+    try {
+      expect(await spawn("template-wins", {})).toMatchObject({ model: "template-provider:template-model", thinking: "medium" });
+      expect(await spawn("caller-model", { provider: "openai", modelId: "gpt-5" })).toMatchObject({ model: "openai:gpt-5", thinking: "medium" });
+      expect(await spawn("caller-thinking", { thinking: "max" })).toMatchObject({ model: "template-provider:template-model", thinking: "max" });
+      expect(await spawn("caller-both", { provider: "openai", modelId: "gpt-5", thinking: "xhigh" })).toMatchObject({ model: "openai:gpt-5", thinking: "xhigh" });
+      await manager.spawnAgent(spawnParams(parentSessionId, "no-thinking-anywhere", "work"));
+      expect(manager.getAgentInfo("no-thinking-anywhere", parentSessionId)).toMatchObject({ model: "test:fake", thinking: "high" });
+      await expect(manager.spawnAgent({ ...spawnParams(parentSessionId, "missing", "work"), agent_type: "absent" })).rejects.toThrow("Agent template not found");
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(templateFile, { force: true });
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+});
+
 describe("child process lifecycle", () => {
   test("hibernates after settle and lazily restarts the persisted session", async () => {
     fs.rmSync(path.join(TEST_AGENT_DIR, "pi-codex-subagents", "config.json"), { force: true });
@@ -550,6 +600,12 @@ describe("extension completion delivery and TUI", () => {
       cwd: TEST_AGENT_DIR,
       mode: "tui",
       model: { provider: "test", id: "fake" },
+      modelRegistry: {
+        getAvailable: () => [
+          { provider: "test", id: "fake" },
+          { provider: "fireworks", id: "accounts/fireworks/models/glm-5p2" },
+        ],
+      },
       sessionManager: {
         getSessionId: () => parentSessionId,
         getSessionFile: () => path.join(TEST_AGENT_DIR, "parent.jsonl"),
@@ -600,6 +656,22 @@ describe("extension completion delivery and TUI", () => {
       expect(large.content).toContain("Output truncated");
       expect(large.details.fullOutputPath).toBeString();
       expect(fs.existsSync(large.details.fullOutputPath)).toBe(true);
+
+      await tools.get("spawn_agent").execute("spawn-3", {
+        task_name: "routed",
+        message: "slow finish",
+        model: "fireworks/accounts/fireworks/models/glm-5p2",
+        thinking: "max",
+      }, undefined, undefined, ctx);
+      expect(getAgent("routed", parentSessionId)).toMatchObject({
+        provider: "fireworks",
+        modelId: "accounts/fireworks/models/glm-5p2",
+        thinking: "max",
+      });
+      await expect(tools.get("spawn_agent").execute("spawn-4", { task_name: "unknown-id", message: "x", model: "fireworks/nope" }, undefined, undefined, ctx))
+        .rejects.toThrow("Model ids for fireworks: accounts/fireworks/models/glm-5p2");
+      await expect(tools.get("spawn_agent").execute("spawn-5", { task_name: "unqualified", message: "x", model: "gpt-5" }, undefined, undefined, ctx))
+        .rejects.toThrow('model must be "provider/model-id"');
     } finally {
       await emit("session_shutdown", { reason: "quit" });
       fs.rmSync(scope, { recursive: true, force: true });
