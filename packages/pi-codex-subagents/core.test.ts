@@ -218,48 +218,30 @@ function spawnParams(parentSessionId: string, task_name: string, message: string
   };
 }
 
-describe("spawn overrides", () => {
-  test("caller model/thinking win over inherited values", async () => {
+describe("spawn model and thinking resolution", () => {
+  test("caller wins, then the template, then the inherited value, then the default", async () => {
     process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
     const parentSessionId = "spawn-overrides";
-    fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
-    const manager = new AgentManager();
-    try {
-      await manager.spawnAgent({ ...spawnParams(parentSessionId, "reviewer", "review"), inheritedThinking: "low", provider: "openai", modelId: "gpt-5", thinking: "xhigh" });
-      expect(manager.getAgentInfo("reviewer", parentSessionId)).toMatchObject({ provider: "openai", modelId: "gpt-5", model: "openai:gpt-5", thinking: "xhigh" });
-      await manager.spawnAgent({ ...spawnParams(parentSessionId, "plain", "work"), inheritedThinking: "low" });
-      expect(manager.getAgentInfo("plain", parentSessionId)).toMatchObject({ model: "test:fake", thinking: "low" });
-      await manager.spawnAgent({ ...spawnParams(parentSessionId, "model-only", "work"), inheritedThinking: "low", provider: "openai", modelId: "gpt-5" });
-      expect(manager.getAgentInfo("model-only", parentSessionId)).toMatchObject({ model: "openai:gpt-5", thinking: "low" });
-      await manager.spawnAgent({ ...spawnParams(parentSessionId, "thinking-only", "work"), inheritedThinking: "low", thinking: "max" });
-      expect(manager.getAgentInfo("thinking-only", parentSessionId)).toMatchObject({ model: "test:fake", thinking: "max" });
-      await expect(manager.spawnAgent({ ...spawnParams(parentSessionId, "half", "work"), provider: "openai" })).rejects.toThrow("needs both provider and modelId");
-    } finally {
-      await manager.shutdown();
-      delete process.env.PI_SUBAGENT_PI_BIN;
-    }
-  });
-
-  test("caller overrides beat a template, and each unset field falls back", async () => {
-    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
-    const parentSessionId = "spawn-overrides-template";
     fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
     const templateFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", "routed.md");
     fs.mkdirSync(path.dirname(templateFile), { recursive: true });
     fs.writeFileSync(templateFile, "---\nname: routed\nprovider: template-provider\nmodel: template-model\nthinking: medium\n---\nRouted template.");
     const manager = new AgentManager();
     const spawn = async (task: string, overrides: Record<string, unknown>) => {
-      await manager.spawnAgent({ ...spawnParams(parentSessionId, task, "work"), agent_type: "routed", inheritedThinking: "low", ...overrides });
+      await manager.spawnAgent({ ...spawnParams(parentSessionId, task, "work"), inheritedThinking: "low", ...overrides });
       return manager.getAgentInfo(task, parentSessionId);
     };
+    const callerModel = { model: { provider: "openai", modelId: "gpt-5" } };
     try {
-      expect(await spawn("template-wins", {})).toMatchObject({ model: "template-provider:template-model", thinking: "medium" });
-      expect(await spawn("caller-model", { provider: "openai", modelId: "gpt-5" })).toMatchObject({ model: "openai:gpt-5", thinking: "medium" });
-      expect(await spawn("caller-thinking", { thinking: "max" })).toMatchObject({ model: "template-provider:template-model", thinking: "max" });
-      expect(await spawn("caller-both", { provider: "openai", modelId: "gpt-5", thinking: "xhigh" })).toMatchObject({ model: "openai:gpt-5", thinking: "xhigh" });
-      await manager.spawnAgent(spawnParams(parentSessionId, "no-thinking-anywhere", "work"));
-      expect(manager.getAgentInfo("no-thinking-anywhere", parentSessionId)).toMatchObject({ model: "test:fake", thinking: "high" });
-      await expect(manager.spawnAgent({ ...spawnParams(parentSessionId, "missing", "work"), agent_type: "absent" })).rejects.toThrow("Agent template not found");
+      expect(await spawn("inherited", {})).toMatchObject({ model: "test:fake", thinking: "low" });
+      expect(await spawn("caller-model", callerModel)).toMatchObject({ model: "openai:gpt-5", thinking: "low" });
+      expect(await spawn("caller-thinking", { thinking: "max" })).toMatchObject({ model: "test:fake", thinking: "max" });
+      expect(await spawn("template", { agent_type: "routed" })).toMatchObject({ model: "template-provider:template-model", thinking: "medium" });
+      expect(await spawn("caller-beats-template", { agent_type: "routed", ...callerModel, thinking: "xhigh" })).toMatchObject({ model: "openai:gpt-5", thinking: "xhigh" });
+      // No level requested anywhere, not even by the parent, falls back to the package default.
+      await manager.spawnAgent(spawnParams(parentSessionId, "default-thinking", "work"));
+      expect(manager.getAgentInfo("default-thinking", parentSessionId)).toMatchObject({ model: "test:fake", thinking: "high" });
+      await expect(spawn("missing", { agent_type: "absent" })).rejects.toThrow("Agent template not found");
     } finally {
       await manager.shutdown();
       fs.rmSync(templateFile, { force: true });
@@ -596,34 +578,56 @@ describe("extension completion delivery and TUI", () => {
       getActiveTools() { return ["read", "bash"]; },
     };
     const parentSessionId = "index-integration-parent";
+    const availableModels = [
+      { provider: "test", id: "fake" },
+      { provider: "fireworks", id: "accounts/fireworks/models/glm-5p2" },
+      { provider: "openai", id: "gpt-5" },
+    ];
+    const notifications: string[] = [];
     const ctx: any = {
       cwd: TEST_AGENT_DIR,
       mode: "tui",
       model: { provider: "test", id: "fake" },
-      modelRegistry: {
-        getAvailable: () => [
-          { provider: "test", id: "fake" },
-          { provider: "fireworks", id: "accounts/fireworks/models/glm-5p2" },
-        ],
-      },
+      modelRegistry: { getAvailable: () => availableModels },
+      // What pi resolved the enabledModels patterns to for this session, availability-checked.
+      scopedModels: [
+        { model: { provider: "fireworks", id: "accounts/fireworks/models/glm-5p2" } },
+        { model: { provider: "openai", id: "gpt-5" } },
+      ],
       sessionManager: {
         getSessionId: () => parentSessionId,
         getSessionFile: () => path.join(TEST_AGENT_DIR, "parent.jsonl"),
       },
       ui: {
         setWidget(_key: string, value: any) { widget = value; },
+        notify(message: string) { notifications.push(message); },
       },
     };
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
+    const configFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "config.json");
+    // A thinking suffix on an allowlist entry is tolerated and stripped from the offered pair.
+    fs.writeFileSync(configFile, JSON.stringify({ models: ["test/fake:high", "typo/nope"], modelsFromEnabledModels: true }));
     const { default: subagentExtension } = await import("./index.js");
     subagentExtension(pi);
     const emit = async (name: string, event: any = {}) => {
       for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
     };
 
+    // Session start is the single resolution point, so before it the arguments are absent.
+    const spawnArgs = () => tools.get("spawn_agent").parameters.properties;
+    expect(spawnArgs().model).toBeUndefined();
+    expect(spawnArgs().thinking).toBeUndefined();
+
     try {
+      // Session start is authoritative: allowlist entries filtered to what is available,
+      // unioned with pi's scoped models, and the schema must not wait for a first turn.
       await emit("session_start", { reason: "startup" });
+      expect(spawnArgs().model.enum).toEqual(["test/fake", "fireworks/accounts/fireworks/models/glm-5p2", "openai/gpt-5"]);
+      expect(spawnArgs().thinking.enum).toContain("max");
+      expect(notifications).toEqual(['spawn_agent models not available: typo/nope']);
+      // The values live in the schema, but the description has to say the capability exists.
+      expect(tools.get("spawn_agent").description).toContain("`model` takes one of the values its schema lists");
       expect(commands.has("agents")).toBe(true);
       expect(commands.has("subagent")).toBe(true);
       expect(commands.has("subagents")).toBe(true);
@@ -668,13 +672,26 @@ describe("extension completion delivery and TUI", () => {
         modelId: "accounts/fireworks/models/glm-5p2",
         thinking: "max",
       });
-      await expect(tools.get("spawn_agent").execute("spawn-4", { task_name: "unknown-id", message: "x", model: "fireworks/nope" }, undefined, undefined, ctx))
-        .rejects.toThrow("Model ids for fireworks: accounts/fireworks/models/glm-5p2");
-      await expect(tools.get("spawn_agent").execute("spawn-5", { task_name: "unqualified", message: "x", model: "gpt-5" }, undefined, undefined, ctx))
-        .rejects.toThrow('model must be "provider/model-id"');
+      // A model the registry has, but neither list allows, is refused.
+      await expect(tools.get("spawn_agent").execute("spawn-4", { task_name: "not-enabled", message: "x", model: "anthropic/claude-opus-4-6" }, undefined, undefined, ctx))
+        .rejects.toThrow(/not in the configured spawn models/);
+
+      // An allowlisted model whose provider dropped out mid-session is refused at spawn time,
+      // covering both availability drift and schemas frozen before the session started.
+      availableModels.splice(availableModels.findIndex((entry) => entry.provider === "openai"), 1);
+      await expect(tools.get("spawn_agent").execute("spawn-5", { task_name: "gone", message: "x", model: "openai/gpt-5" }, undefined, undefined, ctx))
+        .rejects.toThrow(/not currently available/);
+
+      // Unconfigured takes both runtime arguments away again even though Pi still has enabledModels.
+      fs.writeFileSync(configFile, "{}");
+      await emit("session_start", { reason: "restart" });
+      expect(spawnArgs().model).toBeUndefined();
+      expect(spawnArgs().thinking).toBeUndefined();
+      expect(tools.get("spawn_agent").description).not.toContain("`model` takes one of the values");
     } finally {
       await emit("session_shutdown", { reason: "quit" });
       fs.rmSync(scope, { recursive: true, force: true });
+      fs.rmSync(configFile, { force: true });
       delete process.env.PI_SUBAGENT_PI_BIN;
     }
   });

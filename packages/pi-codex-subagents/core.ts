@@ -32,6 +32,8 @@ export type AgentRuntimeStatus = "starting" | "running" | "completed" | "failed"
 export interface SubagentConfig {
   storageDir?: string;
   retentionDays?: number;
+  models?: string[];
+  modelsFromEnabledModels?: boolean;
   defaults?: {
     skills?: string[];
     extensions?: string[];
@@ -121,8 +123,7 @@ export interface SpawnAgentParams {
   inheritedModelId: string;
   inheritedThinking?: ThinkingLevel;
   inheritedTools?: string;
-  provider?: string;
-  modelId?: string;
+  model?: { provider: string; modelId: string };
   thinking?: ThinkingLevel;
 }
 
@@ -219,6 +220,8 @@ function normalizeConfig(value: unknown): SubagentConfig {
   return {
     ...(typeof raw.storageDir === "string" && raw.storageDir.trim() ? { storageDir: raw.storageDir.trim() } : {}),
     ...(retentionDays !== undefined ? { retentionDays } : {}),
+    ...(stringList(raw.models) ? { models: stringList(raw.models) } : {}),
+    ...(raw.modelsFromEnabledModels === true ? { modelsFromEnabledModels: true } : {}),
     ...(defaults && Object.keys(defaults).length ? { defaults } : {}),
   };
 }
@@ -469,7 +472,7 @@ export function getAgentDefinition(name?: string): AgentDefinition | undefined {
 
 export function getAgentDefinitionsDescription(): string {
   const definitions = listAgentDefinitions();
-  if (!definitions.length) return `No agent templates found. Add markdown files to ${AGENTS_DIR}.`;
+  if (!definitions.length) return "None configured, so omit `agent_type`.";
   return definitions.map((definition) => {
     let line = `- \`${definition.name}\`${definition.description ? ` — ${definition.description}` : ""}`;
     if (definition.provider && definition.model) line += ` — model: ${definition.provider}/${definition.model}`;
@@ -980,11 +983,8 @@ export class AgentManager {
     const taskName = normalizeTaskName(params.task_name);
     const definition = getAgentDefinition(params.agent_type);
     if (params.agent_type && !definition) throw new Error(`Agent template not found: ${params.agent_type}`);
-    if (Boolean(params.provider) !== Boolean(params.modelId)) throw new Error("Model override needs both provider and modelId.");
-    const callerModel = params.provider && params.modelId;
-    const templateModel = definition?.provider && definition.model;
-    const provider = callerModel ? params.provider! : templateModel ? definition!.provider! : params.inheritedProvider;
-    const modelId = callerModel ? params.modelId! : templateModel ? definition!.model! : params.inheritedModelId;
+    const templateModel = definition?.provider && definition.model ? { provider: definition.provider, modelId: definition.model } : undefined;
+    const { provider, modelId } = params.model ?? templateModel ?? { provider: params.inheritedProvider, modelId: params.inheritedModelId };
     const config = loadSubagentConfig();
     readSystemPrompt();
     const configuredSkills = definition?.skills ?? config.defaults?.skills;

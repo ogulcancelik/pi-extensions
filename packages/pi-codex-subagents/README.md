@@ -75,6 +75,8 @@ Optional configuration lives at:
 {
   "storageDir": "~/.local/state/pi-codex-subagents/runs",
   "retentionDays": 7,
+  "models": ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-4-6"],
+  "modelsFromEnabledModels": true,
   "defaults": {
     "skills": ["web-investigate"],
     "extensions": ["@scope/pi-extra-tools"]
@@ -86,7 +88,30 @@ Optional configuration lives at:
 
 Configuration is read when agents spawn, while cleanup runs when the extension loads. Restart Pi after changing `storageDir` or `retentionDays` so storage lookup and cleanup use the same configuration throughout the process.
 
-Template skills and extensions override configured defaults. Skills explicitly requested by the parent are added to configured template/default skills. Tool selection belongs to the template or is inherited from the parent. A `model` requested by the parent as one `provider/model-id` argument, and a requested `thinking` level, override the template and the inherited values, so one task can run on another provider without a template.
+Template skills and extensions override configured defaults. Skills explicitly requested by the parent are added to configured template/default skills. Tool selection belongs to the template or is inherited from the parent. A `model` and `thinking` level requested by the parent override the template and the inherited values, so one task can run on another model without a template.
+
+## Model routing
+
+An allowlist in `config.json` decides whether a parent may request a `model` and a `thinking` level per spawn, and which models it may pick. Both arguments appear together or not at all: an installation that configures nothing keeps routing in templates and inheritance. Two sources may be combined:
+
+- `models` lists exact `provider/model-id` pairs approved for this extension alone, independent of any Pi setting.
+- `modelsFromEnabledModels: true` adds the models Pi already scoped for the session, resolved from the `enabledModels` setting and `--models`. Models approved for the installation need no second approval here, and Pi has already expanded globs, preferred aliases over dated versions, and dropped unavailable entries. When Pi has no model scoping configured, this source adds nothing.
+
+The arguments are offered only when at least one allowed model is available, and `model` enumerates exactly those pairs:
+
+| Configuration | Allowed and available | `model` and `thinking` on the tool |
+|---|---|---|
+| neither key set | — | absent, routing belongs to templates |
+| `"modelsFromEnabledModels": true`, Pi scoping unset | — | absent |
+| `"modelsFromEnabledModels": true`, Pi scoping set | 2 models | present, `model` lists those 2 pairs |
+| `"models": ["typo/xyz"]` | nothing available | absent, entry reported as a notification |
+| both keys set | the union, deduplicated | present, `model` lists the union |
+
+The list is resolved when a session starts: `models` entries are filtered to what is currently available, unavailable entries are reported as a warning notification, and the scoped models are merged in. Editing the configuration or the Pi setting takes effect when the next session starts, matching the `storageDir` and `retentionDays` behavior above. If a provider drops out mid-session, `spawn_agent` refuses that model at spawn time instead of serving a stale route.
+
+An allowed model may belong to an extension-registered provider. Route to one only from a template that loads that provider extension, since children load none of their own.
+
+A thinking level written into an `enabledModels` pattern, such as `anthropic/claude-opus-4-6:high`, is ignored here. `thinking` stays a separate argument, and the child clamps it to what its model supports.
 
 ## Completion delivery
 
