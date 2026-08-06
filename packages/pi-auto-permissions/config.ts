@@ -117,7 +117,7 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
   }
   return {
     projectInstructions: evidence.projectInstructions === true,
-    userAnswerTools: (rawTools as string[]).map((tool) => tool.trim()),
+    userAnswerTools: [...new Set((rawTools as string[]).map((tool) => tool.trim()))],
   };
 }
 

@@ -157,8 +157,10 @@ describe("compact review evidence", () => {
           details: {
             answers: [
               { questionIndex: 0, question: "Which hosts first?", kind: "option", answer: "southern, dominion" },
-              { questionIndex: 1, question: "Enable which checks?", kind: "multi", answer: null, selected: ["lint", "tests"], notes: "skip e2e" },
+              { questionIndex: 1, question: "Enable which checks?", kind: "multi", answer: "overridden", selected: ["lint", "tests"], notes: "skip e2e" },
               { questionIndex: 2, question: "Unanswered?", kind: "option", answer: "   " },
+              { questionIndex: 3, question: "Notes only?", kind: "option", answer: "", notes: "a note is not an answer" },
+              { questionIndex: 4, question: "Non-string?", kind: "option", answer: true },
             ],
             cancelled: false,
           },
@@ -170,28 +172,29 @@ describe("compact review evidence", () => {
     expect(records.map((record) => ({ source: record.source, text: record.text }))).toEqual([
       { source: "user", text: "USER: deploy the release to some demo hosts" },
       { source: "tool", text: "TOOL functions.ask_user_question → success" },
-      { source: "user", text: 'USER (dialog answer): "Which hosts first?" -> "southern, dominion"' },
-      { source: "user", text: 'USER (dialog answer): "Enable which checks?" -> "lint; tests (note: skip e2e)"' },
+      { source: "user", text: 'USER (dialog answer): selected "southern, dominion" — assistant-drafted question: "Which hosts first?"' },
+      { source: "user", text: 'USER (dialog answer): selected "lint; tests (note: skip e2e)" — assistant-drafted question: "Enable which checks?"' },
     ]);
-    expect(records[1].key).not.toBe(records[2].key);
+    expect(records[2].key).not.toBe(records[3].key);
     expect(JSON.stringify(records)).not.toContain("ENVELOPE_PROSE_CANARY");
+    expect(AUTO_PERMISSIONS_SYSTEM_PROMPT).toContain('USER (dialog answer):');
   });
 
   test("ignores dialog answers that are not allowlisted, cancelled, errored, or malformed", () => {
     const answers = [{ questionIndex: 0, question: "Which hosts first?", kind: "option", answer: "southern" }];
-    const resultEntry = (details: unknown, isError = false) => [
+    const resultEntry = (details: unknown, isError: unknown = false, toolName = "ask_user_question") => [
       {
         id: "a1",
         type: "message",
         message: {
           role: "assistant",
-          content: [{ type: "toolCall", id: "ask-1", name: "ask_user_question", arguments: {} }],
+          content: [{ type: "toolCall", id: "ask-1", name: toolName, arguments: {} }],
         },
       },
       {
         id: "r1",
         type: "message",
-        message: { role: "toolResult", toolCallId: "ask-1", toolName: "ask_user_question", isError, content: [], details },
+        message: { role: "toolResult", toolCallId: "ask-1", toolName, isError, content: [], details },
       },
     ];
 
@@ -205,7 +208,31 @@ describe("compact review evidence", () => {
     expect(userRecords(resultEntry({ answers, cancelled: false }, true), ["ask_user_question"])).toEqual([]);
     expect(userRecords(resultEntry({ answers: [], cancelled: false }), ["ask_user_question"])).toEqual([]);
     expect(userRecords(resultEntry("prose only"), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: "true" }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: 1 }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: false }, "false"), ["ask_user_question"])).toEqual([]);
     expect(userRecords(resultEntry({ answers, cancelled: false }), ["ask_user_question"]).length).toBe(1);
+    expect(userRecords(resultEntry({ answers, cancelled: false }, undefined), ["ask_user_question"]).length).toBe(1);
+  });
+
+  test("matches bare allowlist names across namespaces but keeps dotted names exact", () => {
+    const answers = [{ questionIndex: 0, question: "Which hosts first?", kind: "option", answer: "southern" }];
+    const resultEntry = (toolName: string) => [
+      {
+        id: "r1",
+        type: "message",
+        message: { role: "toolResult", toolCallId: "ask-1", toolName, isError: false, content: [], details: { answers, cancelled: false } },
+      },
+    ];
+
+    const userRecords = (entries: unknown[], tools: readonly string[]) =>
+      collectReviewEvidence(entries, undefined, tools).filter((record) => record.source === "user");
+
+    expect(userRecords(resultEntry("functions.ask_user_question"), ["ask_user_question"]).length).toBe(1);
+    expect(userRecords(resultEntry("functions.ask_user_question"), ["functions.ask_user_question"]).length).toBe(1);
+    expect(userRecords(resultEntry("evilext.ask_user_question"), ["trusted.ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry("ask_user_question"), ["trusted.ask_user_question"])).toEqual([]);
   });
 
   test("builds explicit cumulative full and delta envelopes around the exact latest action", () => {

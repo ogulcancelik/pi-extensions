@@ -63,9 +63,9 @@ describe("auto permissions config", () => {
     expect(config.rules[0].pattern.test("rm -rf build")).toBeTrue();
   });
 
-  test("accepts and trims user answer tools", () => {
+  test("accepts, trims, and deduplicates user answer tools", () => {
     const path = configFile({
-      reviewEvidence: { userAnswerTools: [" ask_user_question ", "plan_review"] },
+      reviewEvidence: { userAnswerTools: [" ask_user_question ", "plan_review", "ask_user_question"] },
     });
     expect(loadAutoPermissionsConfig(path).reviewEvidence).toEqual({
       projectInstructions: false,

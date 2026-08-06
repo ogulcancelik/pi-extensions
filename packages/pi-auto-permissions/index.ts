@@ -75,7 +75,9 @@ function reviewerFingerprint(
     reasoning: config.reviewer?.reasoningEffort ?? "low",
     systemPrompt,
     projectInstructionsTrusted: config.reviewEvidence.projectInstructions ? projectTrusted : undefined,
-    userAnswerTools: config.reviewEvidence.userAnswerTools,
+    userAnswerTools: config.reviewEvidence.userAnswerTools.length
+      ? [...config.reviewEvidence.userAnswerTools].sort()
+      : undefined,
   });
 }
 
