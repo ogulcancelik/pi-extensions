@@ -465,6 +465,44 @@ describe("auto permissions tool gate", () => {
     expect(calls[2].options.reasoning).toBe("medium");
   });
 
+  test("threads user answer tools into evidence and resets when the allowlist changes", async () => {
+    const path = useConfig({ reviewEvidence: { userAnswerTools: ["ask_user_question"] } });
+    const calls: Array<{ context: any; options: any }> = [];
+    completeOverride = async (context, options) => {
+      calls.push({ context, options });
+      return reviewerResponse();
+    };
+    const state = harness(["push this branch"]);
+    state.setContextEntries([
+      { id: "user-1", type: "message", message: { role: "user", content: "push this branch" } },
+      {
+        id: "ask-result",
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "ask-1",
+          toolName: "ask_user_question",
+          isError: false,
+          content: [{ type: "text", text: "ENVELOPE_PROSE_CANARY" }],
+          details: { answers: [{ question: "Which branch?", answer: "feature" }], cancelled: false },
+        },
+      },
+    ]);
+
+    expect(await state.toolCallHandler({ toolName: "bash", input: { command: "git push origin feature" } }, state.ctx)).toBeUndefined();
+    expect(calls[0].context.messages[0].content[0].text).toContain('"source":"user"');
+    expect(calls[0].context.messages[0].content[0].text).toContain("USER (dialog answer):");
+    expect(calls[0].context.messages[0].content[0].text).not.toContain("ENVELOPE_PROSE_CANARY");
+
+    writeFileSync(path, JSON.stringify({ reviewEvidence: { userAnswerTools: [] }, rules: TEST_RULES }));
+    expect(await state.toolCallHandler({ toolName: "bash", input: { command: "git push origin feature" } }, state.ctx)).toBeUndefined();
+
+    expect(calls[1].options.sessionId).not.toBe(calls[0].options.sessionId);
+    expect(calls[1].context.messages).toHaveLength(1);
+    expect(calls[1].context.messages[0].content[0].text).toContain('mode="full"');
+    expect(calls[1].context.messages[0].content[0].text).not.toContain("USER (dialog answer):");
+  });
+
   test("adds only the highest-priority trusted project instruction file and resets when it changes", async () => {
     useConfig({ reviewEvidence: { projectInstructions: true } });
     const projectDir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-project-"));

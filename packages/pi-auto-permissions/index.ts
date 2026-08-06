@@ -75,6 +75,9 @@ function reviewerFingerprint(
     reasoning: config.reviewer?.reasoningEffort ?? "low",
     systemPrompt,
     projectInstructionsTrusted: config.reviewEvidence.projectInstructions ? projectTrusted : undefined,
+    userAnswerTools: config.reviewEvidence.userAnswerTools.length
+      ? [...config.reviewEvidence.userAnswerTools].sort()
+      : undefined,
   });
 }
 
@@ -266,7 +269,11 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     const systemPrompt = buildReviewerSystemPrompt(config.systemPrompt, projectInstructions);
     const fingerprint = reviewerFingerprint(mainSessionId, model, config, systemPrompt, projectTrusted);
-    const evidence = collectReviewEvidence(ctx.sessionManager.buildContextEntries(), toolCallId);
+    const evidence = collectReviewEvidence(
+      ctx.sessionManager.buildContextEntries(),
+      toolCallId,
+      config.reviewEvidence.userAnswerTools,
+    );
     const evidenceKeys = evidence.map((record) => record.key);
     const budget = reviewContextBudget(model.contextWindow);
     let base = reviewerLineage;

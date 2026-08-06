@@ -24,7 +24,7 @@ describe("auto permissions config", () => {
     expect(config.enabled).toBeTrue();
     expect(config.reviewer).toBeUndefined();
     expect(config.rules).toEqual([]);
-    expect(config.reviewEvidence).toEqual({ projectInstructions: false });
+    expect(config.reviewEvidence).toEqual({ projectInstructions: false, userAnswerTools: [] });
     expect(config.ui).toEqual({ enabled: true, resultDisplayMs: 2500, placement: "widget" });
   });
 
@@ -57,10 +57,29 @@ describe("auto permissions config", () => {
       timeoutMs: 12_000,
     });
     expect(config.systemPrompt).toBe("custom permission policy");
-    expect(config.reviewEvidence).toEqual({ projectInstructions: true });
+    expect(config.reviewEvidence).toEqual({ projectInstructions: true, userAnswerTools: [] });
     expect(config.ui).toEqual({ enabled: true, resultDisplayMs: 5000, placement: "toolRow" });
     expect(config.rules).toHaveLength(1);
     expect(config.rules[0].pattern.test("rm -rf build")).toBeTrue();
+  });
+
+  test("accepts, trims, and deduplicates user answer tools", () => {
+    const path = configFile({
+      reviewEvidence: { userAnswerTools: [" ask_user_question ", "plan_review", "ask_user_question"] },
+    });
+    expect(loadAutoPermissionsConfig(path).reviewEvidence).toEqual({
+      projectInstructions: false,
+      userAnswerTools: ["ask_user_question", "plan_review"],
+    });
+  });
+
+  test("rejects malformed user answer tools", () => {
+    for (const userAnswerTools of ["ask_user_question", [42], [""], ["  "], {}]) {
+      const path = configFile({ reviewEvidence: { userAnswerTools } });
+      expect(() => loadAutoPermissionsConfig(path)).toThrow(
+        "reviewEvidence.userAnswerTools must be an array of non-empty strings",
+      );
+    }
   });
 
   test("loads a prompt file relative to the config", () => {
