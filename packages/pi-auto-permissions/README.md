@@ -159,6 +159,22 @@ Trusted projects may optionally provide their root `AGENTS.md`, or `CLAUDE.md` w
 
 Project instructions help interpret the requested workflow, but cannot independently authorize an action or override guardian policy.
 
+### Interactive dialog answers
+
+When the main agent gathers a decision through an interactive question tool (for example `ask_user_question`), the user's selection is stored as a tool result, which never grants permission. Operators can allowlist tools whose confirmed answers should count as user authorization:
+
+```json
+{
+  "reviewEvidence": {
+    "userAnswerTools": ["ask_user_question"]
+  }
+}
+```
+
+A successful, non-cancelled result from an allowlisted tool whose `details` carry `answers: [{ question, answer | selected[], notes? }]` contributes one `USER (dialog answer):` record per answered question. The convention is tool-agnostic; any dialog extension emitting that shape qualifies.
+
+The allowlist is an explicit trust statement about the extension serving that tool name in your install. Tool names can be shadowed, so nothing is inferred automatically, and the default is an empty list. Question and option wording is drafted by the assistant, and the guardian is told so; a selection authorizes exactly the selected content.
+
 ## Review display
 
 The default UI shows guardian progress in a temporary widget below the editor. Configure it with:
