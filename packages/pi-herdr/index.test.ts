@@ -33,20 +33,24 @@ function response(result: unknown, stdout?: string) {
 	};
 }
 
-function registerTools(handler: (args: string[]) => unknown | string) {
+function registerToolsWithExec(exec: (command: string, args: string[]) => Promise<any>) {
 	const tools = new Map<string, any>();
 	const pi = {
 		registerTool(definition: any) {
 			tools.set(definition.name, definition);
 		},
-		async exec(command: string, args: string[]) {
-			expect(command).toBe("herdr");
-			const result = handler(args);
-			return typeof result === "string" ? response(undefined, result) : response(result);
-		},
+		exec,
 	};
 	herdrExtension(pi as any);
 	return tools;
+}
+
+function registerTools(handler: (args: string[]) => unknown | string) {
+	return registerToolsWithExec(async (command, args) => {
+		expect(command).toBe("herdr");
+		const result = handler(args);
+		return typeof result === "string" ? response(undefined, result) : response(result);
+	});
 }
 
 beforeEach(() => {
@@ -142,6 +146,192 @@ describe("pi-herdr", () => {
 
 		expect(calls).toEqual([["pane", "wait-output", "w1:p2", "--match", "ready", "--timeout", "30000"]]);
 		expect(result.content[0].text).toContain("server ready");
+	});
+
+	test("submits a silent pane command exactly once and separates command status", async () => {
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (command, args) => {
+			expect(command).toBe("herdr");
+			calls.push(args);
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		});
+
+		const result = await tools.get("herdr_pane").execute(
+			"test",
+			{ action: "run", pane: "w1:p2", command: ":" },
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toEqual([["pane", "run", "w1:p2", ":"]]);
+		expect(result.content[0].text).toContain("submission accepted");
+		expect(result.details).toEqual({
+			action: "run",
+			pane: "w1:p2",
+			command: ":",
+			submissionStatus: "accepted",
+			commandStatus: "not_observed",
+			commandExitCode: null,
+		});
+	});
+
+	test("keeps a confirmed code-zero submission accepted when cancellation races after completion", async () => {
+		const controller = new AbortController();
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (_command, args) => {
+			calls.push(args);
+			controller.abort();
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		});
+
+		const result = await tools.get("herdr_pane").execute(
+			"test",
+			{ action: "run", pane: "w1:p2", command: ":" },
+			controller.signal,
+			undefined,
+			{},
+		);
+
+		expect(calls).toHaveLength(1);
+		expect(result.details.submissionStatus).toBe("accepted");
+	});
+
+	test("does not parse pane banners, ANSI, or stderr as run protocol JSON", async () => {
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (_command, args) => {
+			calls.push(args);
+			return {
+				stdout: "\u001b[31mstartup banner\u001b[0m\n{not-json}\n",
+				stderr: "shell warning that is not protocol output\n",
+				code: 0,
+				killed: false,
+			};
+		});
+
+		const result = await tools.get("herdr_pane").execute(
+			"test",
+			{ action: "run", pane: "w1:p2", command: "printf done" },
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toHaveLength(1);
+		expect(result.details.submissionStatus).toBe("accepted");
+		expect(result.details.commandStatus).toBe("not_observed");
+	});
+
+	test("does not treat JSON-shaped code-zero stdout as a submission error", async () => {
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (_command, args) => {
+			calls.push(args);
+			return {
+				stdout: `${JSON.stringify({ error: { code: "not_protocol", message: "pane banner data" } })}\n`,
+				stderr: "",
+				code: 0,
+				killed: false,
+			};
+		});
+
+		const result = await tools.get("herdr_pane").execute(
+			"test",
+			{ action: "run", pane: "w1:p2", command: ":" },
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toHaveLength(1);
+		expect(result.details.submissionStatus).toBe("accepted");
+	});
+
+	test("reports an explicit Herdr rejection as a failed submission without retry", async () => {
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (_command, args) => {
+			calls.push(args);
+			return {
+				stdout: "",
+				stderr: `${JSON.stringify({ error: { code: "pane_not_found", message: "pane w1:p2 not found" } })}\n`,
+				code: 1,
+				killed: false,
+			};
+		});
+
+		expect(
+			tools.get("herdr_pane").execute(
+				"test",
+				{ action: "run", pane: "w1:p2", command: "printf must-not-run" },
+				undefined,
+				undefined,
+				{},
+			),
+		).rejects.toThrow("Pane command submission failed (pane_not_found): pane w1:p2 not found");
+		expect(calls).toHaveLength(1);
+	});
+
+	test("reports an unstructured client failure as ambiguous without retry", async () => {
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (_command, args) => {
+			calls.push(args);
+			return {
+				stdout: "",
+				stderr: "socket closed after request write",
+				code: 1,
+				killed: false,
+			};
+		});
+
+		expect(
+			tools.get("herdr_pane").execute(
+				"test",
+				{ action: "run", pane: "w1:p2", command: "printf maybe-ran" },
+				undefined,
+				undefined,
+				{},
+			),
+		).rejects.toThrow(/submission outcome is ambiguous.*do not retry automatically/i);
+		expect(calls).toHaveLength(1);
+	});
+
+	test("reports a killed Herdr client as ambiguous without retry", async () => {
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (_command, args) => {
+			calls.push(args);
+			return { stdout: "", stderr: "", code: 0, killed: true };
+		});
+
+		expect(
+			tools.get("herdr_pane").execute(
+				"test",
+				{ action: "run", pane: "w1:p2", command: "printf maybe-ran" },
+				undefined,
+				undefined,
+				{},
+			),
+		).rejects.toThrow(/submission outcome is ambiguous.*do not retry automatically/i);
+		expect(calls).toHaveLength(1);
+	});
+
+	test("does not confuse a target command exit with submission acknowledgement", async () => {
+		const calls: string[][] = [];
+		const tools = registerToolsWithExec(async (_command, args) => {
+			calls.push(args);
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		});
+
+		const result = await tools.get("herdr_pane").execute(
+			"test",
+			{ action: "run", pane: "w1:p2", command: "sh -c 'exit 7'" },
+			undefined,
+			undefined,
+			{},
+		);
+
+		expect(calls).toHaveLength(1);
+		expect(result.details.submissionStatus).toBe("accepted");
+		expect(result.details.commandStatus).toBe("not_observed");
+		expect(result.details.commandExitCode).toBeNull();
 	});
 
 	test("refuses to close the caller pane", async () => {
