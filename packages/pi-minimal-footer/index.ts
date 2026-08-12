@@ -267,6 +267,10 @@ function getKimiToken(): string | undefined {
   return getApiKey("kimi-coding", "KIMI_API_KEY");
 }
 
+function getOpencodeToken(): string | undefined {
+  return getApiKey("opencode-go", "OPENCODE_GO_API_KEY");
+}
+
 // ============ Time Formatting ============
 
 function formatResetTime(date: Date): string {
@@ -706,6 +710,60 @@ async function fetchKimiUsage(): Promise<UsageSnapshot> {
   }
 }
 
+async function fetchOpencodeGoUsage(): Promise<UsageSnapshot> {
+  const providerLabel = "OpenCode Go";
+  const token = getOpencodeToken();
+  if (!token) {
+    return { provider: providerLabel, windows: [], error: "no-auth", fetchedAt: Date.now() };
+  }
+
+  try {
+    const res = await fetchWithTimeout("https://opencode.ai/zen/go/v1/usage", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!res.ok) {
+      return { provider: providerLabel, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+    }
+
+    const data = (await res.json()) as any;
+    // API response shape: { usage: { rolling: { status, percent, resetsAt }, weekly: ..., monthly: ... } }
+    const usage = data.usage ?? data;
+    const windows: RateWindow[] = [];
+
+    if (usage.rolling) {
+      const usedPercent = clampPercent(usage.rolling.percent ?? 0);
+      const resetsIn = usage.rolling.resetsAt
+        ? formatResetTime(new Date(usage.rolling.resetsAt))
+        : undefined;
+      windows.push({ label: "5h", usedPercent, resetsIn });
+    }
+
+    if (usage.weekly) {
+      const usedPercent = clampPercent(usage.weekly.percent ?? 0);
+      const resetsIn = usage.weekly.resetsAt
+        ? formatResetTime(new Date(usage.weekly.resetsAt))
+        : undefined;
+      windows.push({ label: "Week", usedPercent, resetsIn });
+    }
+
+    if (usage.monthly) {
+      const usedPercent = clampPercent(usage.monthly.percent ?? 0);
+      const resetsIn = usage.monthly.resetsAt
+        ? formatResetTime(new Date(usage.monthly.resetsAt))
+        : undefined;
+      windows.push({ label: "Month", usedPercent, resetsIn });
+    }
+
+    return { provider: providerLabel, windows, fetchedAt: Date.now() };
+  } catch (e) {
+    return { provider: providerLabel, windows: [], error: String(e), fetchedAt: Date.now() };
+  }
+}
+
 // ============ Provider Detection ============
 
 // Map pi provider names to our internal usage provider keys
@@ -717,6 +775,7 @@ const PROVIDER_MAP: Record<string, string> = {
   minimax: "minimax", // MiniMax Token Plan / Coding Plan
   "minimax-cn": "minimax-cn", // MiniMax China plan
   "kimi-coding": "kimi-coding", // Kimi plan
+  "opencode-go": "opencode-go", // OpenCode Go plan
 };
 
 function detectProvider(modelProvider: string): string | null {
@@ -739,6 +798,8 @@ async function fetchUsageForProvider(provider: string): Promise<UsageSnapshot> {
       return fetchMinimaxUsage("minimax-cn");
     case "kimi-coding":
       return fetchKimiUsage();
+    case "opencode-go":
+      return fetchOpencodeGoUsage();
     default:
       return { provider: "Unknown", windows: [], error: "unknown-provider", fetchedAt: Date.now() };
   }
