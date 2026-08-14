@@ -127,6 +127,14 @@ function normalizedItemId(value: string | undefined): string | undefined {
 	return sanitized.startsWith("fc_") ? sanitized : `fc_${sanitized}`.slice(0, 64);
 }
 
+// The Responses API rejects call_ids longer than 64 characters. Hashing avoids
+// the deterministic prefix collisions caused by truncation, and the stable
+// mapping keeps function_call/function_call_output pairs matched since both
+// sides derive from the same source id.
+function normalizedCallId(value: string): string {
+	return value.length <= 64 ? value : `call_${shortHash(value)}`;
+}
+
 function textSignature(value: unknown): { id?: string; phase?: "commentary" | "final_answer" } {
 	if (typeof value !== "string" || !value) return {};
 	try {
@@ -235,7 +243,8 @@ function messagesToResponseItems(model: Model<any>, messages: Message[], tools: 
 					continue;
 				}
 				if (block.type === "toolCall" && typeof block.id === "string") {
-					const [callId, rawItemId] = block.id.split("|");
+					const [rawCallId, rawItemId] = block.id.split("|");
+					const callId = normalizedCallId(rawCallId);
 					pendingToolCalls.set(block.id, callId);
 					items.push({
 						type: "function_call",
@@ -247,7 +256,8 @@ function messagesToResponseItems(model: Model<any>, messages: Message[], tools: 
 				}
 			}
 		} else if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-			const [callId] = message.toolCallId.split("|");
+			const [rawCallId] = message.toolCallId.split("|");
+			const callId = normalizedCallId(rawCallId);
 			pendingToolCalls.delete(message.toolCallId);
 			items.push({ type: "function_call_output", call_id: callId, output: toolResultOutput(message, model) });
 

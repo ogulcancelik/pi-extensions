@@ -630,6 +630,89 @@ describe("native compaction helpers", () => {
 		});
 	});
 
+	test("preserves valid call ids and keeps hashed shared prefixes distinct", () => {
+		// pi-cursor-sdk bridge ids reach 64 characters at tool 1 and exceed the
+		// Responses API limit once the tool index gains a second digit.
+		const runId = "cursor-pi-bridge-run-00000000-0000-4000-8000-000000000000-tool-";
+		const callIds = [`${runId}1`, `${runId}10`, `${runId}11`];
+		expect(callIds.map((id) => id.length)).toEqual([64, 65, 65]);
+		const assistant = {
+			type: "message",
+			id: "assistant-long-tools",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			message: {
+				role: "assistant",
+				content: callIds.map((id, index) => ({
+					type: "toolCall",
+					id: `${id}|fc_item_${index}`,
+					name: "edit",
+					arguments: {},
+				})),
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+				model: model.id,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		} as SessionEntry;
+		const toolResults = callIds.map((callId, index) => ({
+			type: "message",
+			id: `tool-result-${index}`,
+			parentId: index === 0 ? "assistant-long-tools" : `tool-result-${index - 1}`,
+			timestamp: new Date().toISOString(),
+			message: {
+				role: "toolResult",
+				toolCallId: `${callId}|fc_item_${index}`,
+				toolName: "edit",
+				content: [{ type: "text", text: `ok-${index}` }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		}) as SessionEntry);
+
+		const input = effectiveInputForBranch({ branch: [assistant, ...toolResults], model, tools: [] });
+		const calls = input.filter((item) => item.type === "function_call");
+		const outputs = input.filter((item) => item.type === "function_call_output");
+		const normalizedIds = calls.map((item) => String(item.call_id));
+		expect(normalizedIds[0]).toBe(callIds[0]);
+		expect(normalizedIds.slice(1)).not.toEqual(callIds.slice(1));
+		expect(calls.map((item) => item.id)).toEqual(["fc_item_0", "fc_item_1", "fc_item_2"]);
+		expect(normalizedIds.every((id) => id.length <= 64)).toBe(true);
+		expect(new Set(normalizedIds).size).toBe(normalizedIds.length);
+		expect(outputs.map((item) => item.call_id)).toEqual(normalizedIds);
+	});
+
+	test("synthesized outputs for orphaned over-limit call ids stay paired", () => {
+		const longCallId = `cursor-pi-bridge-run-${"1".repeat(36)}-tool-11`;
+		const assistant = {
+			type: "message",
+			id: "assistant-long-orphan",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: `${longCallId}|fc_item_2`, name: "edit", arguments: {} }],
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+				model: model.id,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		} as SessionEntry;
+		const user = { ...userEntry("user-after-long-orphan", "interrupt"), parentId: "assistant-long-orphan" } as SessionEntry;
+
+		const input = effectiveInputForBranch({ branch: [assistant, user], model, tools: [] });
+		const call = input.find((item) => item.type === "function_call")!;
+		const output = input.find((item) => item.type === "function_call_output")!;
+		expect(String(call.call_id).length).toBeLessThanOrEqual(64);
+		expect(output).toEqual({
+			type: "function_call_output",
+			call_id: call.call_id,
+			output: "No result provided",
+		});
+	});
+
 	test("latest compaction on the active branch is authoritative", () => {
 		const native = {
 			type: "compaction",
