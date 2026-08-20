@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const CONFIG_FILENAME = "model-thinking.json";
 
-const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type ThinkingLevel = (typeof ALL_LEVELS)[number];
 
 interface ModelThinkingConfig {
