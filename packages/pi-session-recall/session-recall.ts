@@ -1,9 +1,8 @@
 /**
  * Session Recall Extension - Search and query past pi sessions
  *
- * Two tools + one command:
+ * Two tools:
  *
- * Tools:
  * 1. session_search - Find relevant past sessions by keywords.
  *    Use when the user mentions something from a previous conversation
  *    and you need to find which session it was in.
@@ -13,11 +12,6 @@
  *    specific session, or when you already know the session path
  *    (e.g., from a handoff).
  *
- * Command:
- * /session-recall - Configure the model used for session queries.
- *    Shows all available models and lets you pick one. Persists the
- *    choice to ~/.pi/agent/session-recall.json (or equivalent).
- *
  * Typical flow: user says "remember when we tried X?" →
  *   session_search("X") → find the right session →
  *   session_query(path, "what approach did we take for X?")
@@ -25,12 +19,12 @@
 
 import {
 	cleanupSessionResources,
-	complete,
 	type Model,
 	type Api,
 	type Message,
 } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { complete } from "@earendil-works/pi-ai/compat";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	getAgentDir,
 	SessionManager,
@@ -39,21 +33,12 @@ import {
 	serializeConversation,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import {
-	Container,
-	Input,
-	Markdown,
-	SelectList,
-	type SelectItem,
-	type SelectListTheme,
-	Spacer,
-	Text,
-} from "@earendil-works/pi-tui";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -79,19 +64,10 @@ function loadConfig(): SessionRecallConfig {
 	}
 }
 
-function saveConfig(config: SessionRecallConfig): void {
-	const configPath = getConfigPath();
-	const dir = dirname(configPath);
-	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true });
-	}
-	writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-}
-
 /**
  * Resolve the query model from config → fallback to current session model.
  */
-function resolveQueryModel(ctx: ExtensionCommandContext): Model<Api> | undefined {
+function resolveQueryModel(ctx: ExtensionContext): Model<Api> | undefined {
 	const config = loadConfig();
 	if (config.queryModel) {
 		const found = ctx.modelRegistry.find(config.queryModel.provider, config.queryModel.id);
@@ -565,168 +541,11 @@ const MAX_SNIPPETS_PER_SESSION = 3;
 // ── Extension ────────────────────────────────────────────────────────────────
 
 export default function sessionRecallExtension(pi: ExtensionAPI) {
-	// ── /session-recall command ────────────────────────────────────────────
-
-	pi.registerCommand("session-recall", {
-		description: "Configure the model used for session queries",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("Interactive mode required for /session-recall", "warning");
-				return;
-			}
-
-			const config = loadConfig();
-			const available = ctx.modelRegistry.getAvailable();
-
-			if (available.length === 0) {
-				ctx.ui.notify("No models available. Configure API keys first.", "warning");
-				return;
-			}
-
-			const currentKey = config.queryModel
-				? `${config.queryModel.provider}/${config.queryModel.id}`
-				: null;
-
-			// Build select items: session model fallback + all available models
-			const SESSION_MODEL_VALUE = "__session_model__";
-			const items: SelectItem[] = [
-				{
-					value: SESSION_MODEL_VALUE,
-					label: "(use current session model)",
-					description: currentKey === null ? "active" : undefined,
-				},
-				...available.map((m) => {
-					const key = `${m.provider}/${m.id}`;
-					return {
-						value: key,
-						label: key,
-						description: key === currentKey ? "active" : undefined,
-					};
-				}),
-			];
-
-			const choice = await ctx.ui.custom<string | undefined>(
-				(tui, theme, _kb, done) => {
-					const selectTheme: SelectListTheme = {
-						selectedPrefix: (t) => theme.fg("accent", t),
-						selectedText: (t) => theme.fg("accent", t),
-						description: (t) => theme.fg("muted", t),
-						scrollInfo: (t) => theme.fg("muted", t),
-						noMatch: (t) => theme.fg("muted", t),
-					};
-
-					const container = new Container();
-					const title = new Text(
-						theme.bold("Query model for session_query") +
-							theme.fg("muted", "  (type to filter)"),
-						0,
-						0,
-					);
-					const input = new Input();
-					const listSpacer = new Spacer(1);
-					const hint = new Text(
-						theme.fg("muted", "  ↑/↓ navigate · Enter select · Esc cancel"),
-						0,
-						0,
-					);
-
-					// Fuzzy filter: every term must appear somewhere in the label
-					const fuzzyMatch = (label: string, query: string): boolean => {
-						const lower = label.toLowerCase();
-						const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-						return terms.every((term) => lower.includes(term));
-					};
-
-					let list: SelectList;
-
-					const buildList = (filtered: SelectItem[]): SelectList => {
-						const sl = new SelectList(filtered, 10, selectTheme);
-						sl.onSelect = (item) => done(item.value);
-						sl.onCancel = () => done(undefined);
-						return sl;
-					};
-
-					// Initial list with all items, pre-select active
-					list = buildList(items);
-					const activeIdx = items.findIndex(
-						(i) => i.value === (currentKey ?? SESSION_MODEL_VALUE),
-					);
-					if (activeIdx >= 0) list.setSelectedIndex(activeIdx);
-
-					container.addChild(title);
-					container.addChild(new Spacer(1));
-					container.addChild(input);
-					container.addChild(listSpacer);
-					container.addChild(list);
-					container.addChild(new Spacer(1));
-					container.addChild(hint);
-
-					input.onSubmit = () => {
-						const selected = list.getSelectedItem();
-						if (selected) done(selected.value);
-					};
-					input.onEscape = () => done(undefined);
-
-					const rebuildList = () => {
-						const query = input.getValue();
-						const filtered = query
-							? items.filter((item) => fuzzyMatch(item.label, query))
-							: items;
-
-						container.removeChild(list);
-						list = buildList(filtered);
-						// Re-insert list at correct position (after listSpacer)
-						const spacerIdx = container.children.indexOf(listSpacer);
-						container.children.splice(spacerIdx + 1, 0, list);
-						tui.requestRender();
-					};
-
-					container.handleInput = (data: string) => {
-						// Navigation keys go to the select list
-						const isNav =
-							data === "\x1b[A" || // up
-							data === "\x1b[B" || // down
-							data === "\r" || // enter
-							data === "\n";
-
-						if (isNav) {
-							list.handleInput(data);
-						} else if (data === "\x1b" || data === "\x03") {
-							done(undefined);
-						} else {
-							input.handleInput(data);
-							rebuildList();
-						}
-					};
-
-					return container;
-				},
-			);
-
-			if (choice === undefined) return; // cancelled
-
-			if (choice === SESSION_MODEL_VALUE) {
-				delete config.queryModel;
-				saveConfig(config);
-				ctx.ui.notify("Session query will use the current session model", "info");
-			} else {
-				const slashIdx = choice.indexOf("/");
-				if (slashIdx === -1) return;
-
-				const provider = choice.slice(0, slashIdx);
-				const id = choice.slice(slashIdx + 1);
-				config.queryModel = { provider, id };
-				saveConfig(config);
-				ctx.ui.notify(`Session query model set to ${choice}`, "info");
-			}
-		},
-	});
-
 	// ── session_search tool ────────────────────────────────────────────────
 
 	pi.registerTool({
 		name: "session_search",
-		label: (params) => `Session Search: ${params.query}`,
+		label: "Session Search",
 		description:
 			"Find past sessions by literal text search. This is essentially `rg -i -F` over session JSONL files, not semantic search. " +
 			"Use one exact token or phrase. Spaces are exact spaces in an exact phrase, so only use spaces for wording you expect appeared in the session, such as an error message. " +
@@ -856,7 +675,7 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "session_query",
-		label: (params) => `Session Query: ${params.question}`,
+		label: "Session Query",
 		description:
 			"Query a specific session file to get detailed information. Use after session_search to dig into a particular session, " +
 			"or when you already have a session path (e.g., from a handoff). Sends the conversation and tool calls, without assistant thinking or tool output, to an LLM for analysis.",
@@ -956,7 +775,7 @@ export default function sessionRecallExtension(pi: ExtensionAPI) {
 			if (!queryModel) {
 				return errorResult(
 					"Error: No model available to analyze the session. " +
-						"Configure one with /session-recall or set up API keys.",
+						"Configure queryModel in session-recall.json or set up API keys.",
 				);
 			}
 

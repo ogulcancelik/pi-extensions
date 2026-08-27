@@ -60,15 +60,9 @@ Loads one selected session and sends its conversation to an LLM with a focused q
 
 For a session larger than the model's context window, it keeps the beginning, end, and sections relevant to the question. Omitted sections are marked with `[... N messages omitted ...]`.
 
-### Choose the query model
-
-Run `/session-recall` to choose the model used by `session_query`. Selecting a cheaper model keeps recall inexpensive while your current model continues to orchestrate the search and use the answer.
-
-If you do not configure a query model, `session_query` uses the model active in your current session.
-
 ## Configuration
 
-Config is stored at `~/.pi/agent/session-recall.json`:
+To use a dedicated model for `session_query`, create or edit `~/.pi/agent/session-recall.json`:
 
 ```json
 {
