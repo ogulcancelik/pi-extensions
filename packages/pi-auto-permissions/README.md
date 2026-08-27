@@ -100,7 +100,7 @@ Rule fields are:
 - `label`: short description shown during review
 - `message`: optional feedback; required for convention rules
 
-A convention rule blocks directly with its configured feedback instead of asking the guardian. The agent can call `request_override` for a legitimate one-session exception. Overrides require user confirmation and cannot bypass guarded rules.
+A convention rule blocks directly with its configured feedback instead of asking the guardian.
 
 Set `enabled` to `false` to disable the extension. Invalid configuration fails closed and blocks Bash calls until corrected.
 

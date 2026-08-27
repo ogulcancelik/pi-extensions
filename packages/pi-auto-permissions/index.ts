@@ -2,7 +2,6 @@ import { cleanupSessionResources, type Message } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -181,11 +180,10 @@ function conventionReason(gate: Gate, command: string): string {
   let reason = `Convention violation: ${gate.label}\n\n${gate.message ?? "Use the configured project tooling."}`;
   const suggestion = gate.suggest?.(command);
   if (suggestion && suggestion !== command) reason += `\n\nSuggested command:\n  ${suggestion}`;
-  return `${reason}\n\nIf this is a legitimate edge case, explain why and call \`request_override\` with the exact command.`;
+  return reason;
 }
 
 export default function autoPermissionsExtension(pi: ExtensionAPI) {
-  const allowedConventionCommands = new Set<string>();
   let trustedGroups = new Set<string>();
   let lastConfigError: string | undefined;
   let sessionActive = true;
@@ -583,9 +581,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     const matches = untrustedMatches(command, config);
     if (!matches.length) return;
     const convention = matches.find((gate) => gate.level === "convention");
-    if (convention && !allowedConventionCommands.has(command)) {
-      return { block: true, reason: conventionReason(convention, command) };
-    }
+    if (convention) return { block: true, reason: conventionReason(convention, command) };
     const gate = matches.find((candidate) => candidate.level === "guarded");
     if (!gate) return;
 
@@ -637,79 +633,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     if (!reviewRows.has(event.toolCallId)) reviewRowInvalidators.delete(event.toolCallId);
   });
 
-  pi.registerTool({
-    name: "request_override",
-    executionMode: "sequential",
-    label: "Request Override",
-    description: "Request a one-session exception for a command that violates a tooling convention. This cannot bypass guarded commands.",
-    parameters: Type.Object({
-      command: Type.String({ description: "Exact command to allow" }),
-      reason: Type.String({ description: "Why the convention does not apply" }),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      let config: AutoPermissionsConfig;
-      try {
-        config = currentConfig(ctx);
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-          details: { success: false },
-        };
-      }
-      const matches = untrustedMatches(params.command, config);
-      if (!matches.length || matches.some((gate) => gate.level === "guarded")) {
-        return {
-          content: [{ type: "text", text: "The command is not a convention violation. Guarded commands cannot be bypassed with request_override." }],
-          details: { success: false },
-        };
-      }
-      const gate = matches[0];
-      const lifecycleSignal = reviewerLifecycleController.signal;
-      const lifecycleStale = () => lifecycleSignal.aborted || reviewerLifecycleController.signal !== lifecycleSignal;
-      const promptSignal = signal ? AbortSignal.any([signal, lifecycleSignal]) : lifecycleSignal;
-      const cancelled = () => ({
-        content: [{ type: "text" as const, text: "Override cancelled." }],
-        details: { success: false },
-      });
-      if (lifecycleStale() || reviewCancelled(signal)) return cancelled();
-      if (!ctx.hasUI) {
-        return {
-          content: [{ type: "text", text: "Cannot request an override without an interactive UI." }],
-          details: { success: false },
-        };
-      }
-
-      setHerdrBlocked(true, gate.label);
-      try {
-        let choice: string | undefined;
-        try {
-          choice = await ctx.ui.select(
-            `Convention override: ${gate.label}\n\n${params.reason}\n\n${params.command}`,
-            ["Allow for this session", "Keep blocked"],
-            { signal: promptSignal },
-          );
-        } catch (error) {
-          if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
-          return cancelled();
-        }
-        if (lifecycleStale() || reviewCancelled(signal)) return cancelled();
-        if (choice === "Allow for this session") {
-          allowedConventionCommands.add(params.command);
-          return {
-            content: [{ type: "text", text: `Override granted for this session:\n  ${params.command}` }],
-            details: { success: true, command: params.command },
-          };
-        }
-        return {
-          content: [{ type: "text", text: gate.message ?? "Use the configured project tooling." }],
-          details: { success: false },
-        };
-      } finally {
-        if (!lifecycleStale()) setHerdrBlocked(false);
-      }
-    },
-  });
-
   pi.on("session_shutdown", async (_event, ctx) => {
     sessionActive = false;
     reviewerLifecycleController.abort();
@@ -726,13 +649,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     discardReviewerLineage();
     reviewerLifecycleController = new AbortController();
     sessionActive = true;
-    allowedConventionCommands.clear();
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
-      if (entry.message.toolName !== "request_override") continue;
-      const details = entry.message.details as { success?: boolean; command?: string } | undefined;
-      if (details?.success && details.command) allowedConventionCommands.add(details.command);
-    }
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
     try {
       const config = currentConfig(ctx);

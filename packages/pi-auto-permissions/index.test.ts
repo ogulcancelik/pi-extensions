@@ -78,7 +78,6 @@ function harness(branchInput: any[], mode = "print") {
   let toolExecutionEndHandler: any;
   let sessionStartHandler: any;
   let sessionShutdownHandler: any;
-  let overrideTool: any;
   let bashTool: any;
   let bashSourceInfo = { path: "<builtin:bash>", source: "builtin" };
   const widgets: unknown[] = [];
@@ -98,7 +97,6 @@ function harness(branchInput: any[], mode = "print") {
       if (name === "session_shutdown") sessionShutdownHandler = handler;
     },
     registerTool(tool: any) {
-      if (tool.name === "request_override") overrideTool = tool;
       if (tool.name === "bash") {
         bashTool = tool;
         bashSourceInfo = { path: "/extensions/pi-auto-permissions/index.ts", source: "extension" };
@@ -144,7 +142,6 @@ function harness(branchInput: any[], mode = "print") {
     toolExecutionEndHandler,
     sessionStartHandler,
     sessionShutdownHandler,
-    overrideTool,
     get bashTool() { return bashTool; },
     setBashSource(sourceInfo: { path: string; source: string }) { bashSourceInfo = sourceInfo; },
     setBranch(entries: any[]) {
@@ -174,63 +171,16 @@ afterEach(() => {
 });
 
 describe("auto permissions tool gate", () => {
-  test("registers convention overrides as sequential", () => {
-    const { overrideTool } = harness([]);
-    expect(overrideTool.executionMode).toBe("sequential");
-  });
-
-  test("does not grant a convention override after cancellation", async () => {
-    const { overrideTool, toolCallHandler, ctx } = harness([], "tui");
-    let resolveSelect!: (value: string) => void;
-    (ctx.ui as any).select = () => new Promise((resolve) => { resolveSelect = resolve; });
-    const controller = new AbortController();
-    const pending = overrideTool.execute(
-      "override-1",
-      { command: "pip install requests", reason: "legacy project" },
-      controller.signal,
-      undefined,
-      ctx,
-    );
-    await Bun.sleep(0);
-    controller.abort();
-    resolveSelect("Allow for this session");
-    const result = await pending;
-    expect(result.details.success).toBeFalse();
-    expect(result.content[0].text).toBe("Override cancelled.");
-
-    const gateResult = await toolCallHandler(
+  test("blocks convention violations with corrective guidance", async () => {
+    const { toolCallHandler, ctx } = harness([]);
+    const result = await toolCallHandler(
       { toolName: "bash", input: { command: "pip install requests" } },
       ctx,
     );
-    expect(gateResult.reason).toContain("Convention violation");
-  });
-
-  test("does not grant a convention override after session restart", async () => {
-    const state = harness([], "tui");
-    let resolveSelect!: (value: string) => void;
-    (state.ctx.ui as any).select = () => new Promise((resolve) => { resolveSelect = resolve; });
-    const pending = state.overrideTool.execute(
-      "override-restart",
-      { command: "pip install requests", reason: "legacy project" },
-      undefined,
-      undefined,
-      state.ctx,
-    );
-    await Bun.sleep(0);
-    await Promise.all([
-      state.sessionShutdownHandler({}, state.ctx),
-      state.sessionStartHandler({}, state.ctx),
-    ]);
-    resolveSelect("Allow for this session");
-    const result = await pending;
-    expect(result.details.success).toBeFalse();
-    expect(result.content[0].text).toBe("Override cancelled.");
-
-    const gateResult = await state.toolCallHandler(
-      { toolName: "bash", input: { command: "pip install requests" } },
-      state.ctx,
-    );
-    expect(gateResult.reason).toContain("Convention violation");
+    expect(result).toEqual({
+      block: true,
+      reason: "Convention violation: pip install\n\nUse uv instead.",
+    });
   });
 
   test("allows an approved guarded command", async () => {
