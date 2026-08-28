@@ -60,7 +60,7 @@ Use `herdr_pane` for ordinary commands and intentional raw terminal control.
 | Action | Description |
 |---|---|
 | `get` | Inspect a pane |
-| `run` | Submit a shell command atomically with Enter |
+| `run` | Submit a shell command atomically with Enter and report the submission acknowledgement, not the command exit code |
 | `read` | Read terminal output |
 | `wait_output` | Wait for literal or regular-expression output |
 | `send_text` | Send literal text without Enter |
@@ -68,6 +68,10 @@ Use `herdr_pane` for ordinary commands and intentional raw terminal control.
 | `close` | Close a pane other than the pane running Pi |
 
 `wait_output` searches existing output immediately before waiting for future output. Use `recent-unwrapped` for logs and transcripts.
+
+`run` invokes the Herdr client exactly once. A zero client exit means the server accepted the submission even when the client's stdout is empty; pane prompts, banners, ANSI, and command output are never parsed as protocol JSON. The successful tool result records `submissionStatus: "accepted"`, `commandStatus: "not_observed"`, and `commandExitCode: null`. Capture the target command's actual exit code in a unique pane-output marker, then inspect it with `wait_output` or `read`.
+
+A nonzero Herdr client exit with a structured Herdr error is reported as a failed submission. A killed client or nonzero exit without a structured error is reported as ambiguous because the command may already have been accepted; the extension never retries automatically.
 
 Pane actions do not validate coding-agent identity or interpret agent lifecycle. Use `herdr_agent` when a pane contains a recognized coding agent.
 
