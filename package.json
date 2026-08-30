@@ -5,6 +5,33 @@
   "workspaces": [
     "packages/*"
   ],
+  "pi": {
+    "extensions": [
+      "./packages/pi-auto-permissions/index.ts",
+      "./packages/pi-codex-compaction/index.ts",
+      "./packages/pi-codex-subagents/index.ts",
+      "./packages/pi-flicker/index.ts",
+      "./packages/pi-ghost/index.ts",
+      "./packages/pi-ghostty-theme-sync/index.ts",
+      "./packages/pi-goal/index.ts",
+      "./packages/pi-handoff/handoff.ts",
+      "./packages/pi-herdr/index.ts",
+      "./packages/pi-herdr-worktree-jump/index.ts",
+      "./packages/pi-minimal-footer/index.ts",
+      "./packages/pi-model-agents/index.ts",
+      "./packages/pi-model-thinking/index.ts",
+      "./packages/pi-quit-and-delete/index.ts",
+      "./packages/pi-session-recall/session-recall.ts",
+      "./packages/pi-sketch/extensions",
+      "./packages/pi-spar/index.ts",
+      "./packages/pi-ssh-tools/index.ts",
+      "./packages/pi-tmux/index.ts",
+      "./packages/pi-worktree/index.ts"
+    ],
+    "skills": [
+      "./packages/pi-web-browse/SKILL.md"
+    ]
+  },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.80.10",
     "@earendil-works/pi-coding-agent": "^0.80.10",
