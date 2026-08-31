@@ -27,6 +27,15 @@ const {
   parseAgentDefinitionText,
   taskStorageKey,
 } = await import("./core.js");
+const { formatAgentSpecLines } = await import("./peek.js");
+
+
+test("formats the resolved subagent model and thinking for the detail overlay", () => {
+  expect(formatAgentSpecLines({ provider: "openai-codex", modelId: "gpt-5.5", thinking: "high" })).toEqual([
+    "Model: openai-codex/gpt-5.5",
+    "Thinking: high",
+  ]);
+});
 
 describe("RPC framing", () => {
   test("explains quota errors that Node leaves unnamed", () => {
@@ -741,10 +750,13 @@ describe("extension completion delivery and TUI", () => {
       const secondAgentPage = await tools.get("list_agents").execute("list-2", { offset: 10 }, undefined, undefined, ctx);
       expect(JSON.parse(secondAgentPage.content[0].text)).toMatchObject({ total: 12, returned: 2, offset: 10, next_offset: null });
 
-      await tools.get("spawn_agent").execute("spawn-1", {
+      const spawnResult = await tools.get("spawn_agent").execute("spawn-1", {
         task_name: "x".repeat(200),
         message: "slow finish",
       }, undefined, undefined, ctx);
+
+      const spawnRendered = tools.get("spawn_agent").renderResult(spawnResult, {}, { fg: (_color: string, text: string) => text }).render(400);
+      expect(spawnRendered.join("\n").trim()).toBe(`✓ ${spawnResult.details.task_name} · test/fake · high`);
 
       expect(widget).toBeFunction();
       const theme = { fg: (_color: string, text: string) => text };
