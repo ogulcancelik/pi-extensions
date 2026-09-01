@@ -1,25 +1,25 @@
 # pi-codex-compaction
 
 > [!WARNING]
-> This extension is under active development. Its behavior and configuration may change.
+> This extension is under active development. Its behavior may change.
 
 OpenAI Codex native remote compaction integrated into Pi's existing compaction lifecycle.
 
-## Why automatic compaction is enabled by default
+Pi 0.84.4 or later is recommended. Older releases use a compatibility fallback for safe mid-run compaction.
 
-Pi's automatic threshold is too late for uninterrupted tool loops. Pi normally checks for compaction after the agent run settles, so repeated assistant → tool → provider turns can pass the configured context limit without giving compaction a chance to run. One observed run reached 361k tokens—132.7% of a 272k limit—with 189 additional tool-use responses and no compaction entry. Requests above 272k enter Codex's long-context pricing tier, which doubles input and cache-read cost and raises output cost by 50%. The extension therefore enables its own 90% turn-boundary threshold by default.
+## Why native compaction
 
-## Why compaction uses Pi's lifecycle
-
-The published extension previously compacted only the provider payload and stored the checkpoint as a custom session entry. OpenAI received shorter context, but Pi had no real compaction boundary and kept processing and rendering the full transcript. In large live sessions this drove Pi to roughly 95–135% CPU; creating a real Pi compaction boundary reduced it to roughly 6–10%. This version stores the native checkpoint in Pi's compaction entry so Pi stops rebuilding and rendering the old transcript too.
+Pi normally summarizes older messages as text. This extension instead asks OpenAI Codex for its native opaque compaction checkpoint and stores that checkpoint in Pi's real compaction entry. Pi therefore stops rebuilding and rendering the replaced transcript, while OpenAI receives its native compacted history on later requests.
 
 ## How it works
 
-When the active model uses `openai-codex/openai-codex-responses`, the extension intercepts Pi's manual, threshold, and overflow compaction events. It sends the finalized Responses history to the normal Codex endpoint with a trailing `compaction_trigger`, stores the returned opaque `compaction` item inside Pi's real compaction entry, and lets Pi rebuild the active transcript from that boundary.
+On Pi 0.84.4 and later, Pi owns compaction timing and continuation. It triggers compaction manually, at its configured context threshold, or during overflow recovery. Threshold checks run after tools finish and before the next assistant response, so long tool-driven runs compact and resume without being aborted or restarted.
 
-During a tool-driven run, the extension checks Pi's reported context usage after each completed turn. At 90%, it aborts before the next provider request. Once the agent settles, it invokes Pi's normal compaction lifecycle. After successful compaction it sends a visible user continuation message. If Pi's own threshold or overflow compaction runs first, the extension uses that result instead of compacting twice.
+On older Pi releases, the extension enables its legacy 90% guard. It stops before the next provider request, invokes Pi's compaction lifecycle after the run settles, and resumes only when needed. The fallback turns off automatically after Pi is upgraded.
 
-Pi requires compaction events to store a summary string, so they receive a short local checkpoint marker. The marker is filtered from provider context and is never sent to OpenAI. Overflow recovery remains owned by Pi.
+When the active model uses `openai-codex/openai-codex-responses`, the extension handles Pi's `session_before_compact` event. It sends the finalized Responses history to the Codex endpoint with a trailing `compaction_trigger`, stores the returned opaque `compaction` item in Pi's compaction entry, and lets Pi continue the same run with the rebuilt context.
+
+Pi requires compaction events to store a summary string, so each entry receives a short local checkpoint marker. The marker is filtered from provider context and is never sent to OpenAI.
 
 In interactive mode, each native compaction adds `OpenAI compaction running…` and completion or failure markers to the chat transcript. These durable TUI entries are never included in model context.
 
@@ -39,16 +39,21 @@ Compaction is fail-closed. If a native request fails, Pi's compaction is cancell
 
 ## Configuration
 
-Mid-run compaction is enabled at 90% by default:
+On Pi 0.84.4 and later, configure compaction through Pi in `~/.pi/agent/settings.json` or project-local `.pi/settings.json`:
 
 ```json
 {
-  "autoCompact": true,
-  "thresholdRatio": 0.9
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
 }
 ```
 
-Save this as `~/.pi/agent/pi-codex-compaction.json` or project-local `.pi/pi-codex-compaction.json`. Project configuration takes precedence. `thresholdRatio` must be greater than 0 and less than 1. Pi's `compaction.reserveTokens` setting still controls Pi's own threshold compaction.
+Pi compacts when context exceeds `contextWindow - reserveTokens`. For example, a `reserveTokens` value of `27200` gives a 90% threshold for a 272k context window.
+
+On older Pi releases only, the fallback defaults to `autoCompact: true` and `thresholdRatio: 0.9`. Existing `~/.pi/agent/pi-codex-compaction.json` and project-local `.pi/pi-codex-compaction.json` overrides remain supported until Pi is upgraded.
 
 ## Data handling
 
@@ -59,5 +64,3 @@ The current conversation is sent to the ChatGPT Codex Responses endpoint. OpenAI
 Native checkpoints are model-specific. Switch back to the model that created the checkpoint before continuing. Provider switching is not a portability path because no textual summary is generated.
 
 Pi does not expose a finalized provider payload during `session_before_compact`. The extension mirrors Pi's Codex message conversion and combines it with the latest observed request shape to construct the compaction request. Extensions loaded later that independently rewrite provider payloads can therefore create order-dependent behavior.
-
-Mid-run compaction uses `ctx.abort()` because Pi does not yet expose a supported way for extensions to stop cleanly between tool turns. The abort happens only after `turn_end`, when tool results are finalized, but it remains a temporary compatibility path until Pi supports turn-boundary compaction directly.

@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-codex-compaction",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "OpenAI Codex native remote compaction for Pi's existing compaction lifecycle.",
   "type": "module",
   "keywords": [
@@ -28,9 +28,9 @@
     "test": "bun test"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.80.10",
-    "@earendil-works/pi-coding-agent": ">=0.80.10",
-    "@earendil-works/pi-tui": ">=0.80.10"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "publishConfig": {
     "access": "public"

@@ -3,17 +3,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 
-export interface CodexCompactionConfig {
+export interface LegacyCompactionConfig {
 	autoCompact: boolean;
 	thresholdRatio: number;
 }
 
-const DEFAULT_CONFIG: CodexCompactionConfig = {
+const DEFAULT_CONFIG: LegacyCompactionConfig = {
 	autoCompact: true,
 	thresholdRatio: 0.9,
 };
 
-function readConfig(path: string): Partial<CodexCompactionConfig> {
+function readConfig(path: string): Partial<LegacyCompactionConfig> {
 	if (!existsSync(path)) return {};
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
@@ -30,7 +30,7 @@ function readConfig(path: string): Partial<CodexCompactionConfig> {
 	}
 }
 
-export function loadConfig(cwd: string, projectTrusted: boolean): CodexCompactionConfig {
+export function loadLegacyConfig(cwd: string, projectTrusted: boolean): LegacyCompactionConfig {
 	const globalConfig = readConfig(join(homedir(), CONFIG_DIR_NAME, "agent", "pi-codex-compaction.json"));
 	const projectConfig = projectTrusted
 		? readConfig(join(cwd, CONFIG_DIR_NAME, "pi-codex-compaction.json"))
