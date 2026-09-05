@@ -635,6 +635,7 @@ describe("auto permissions tool gate", () => {
           invalidate: () => { invalidations++; },
           lastComponent,
           executionStarted: true,
+          isPartial: true,
         },
       );
       return (lastComponent as { render(width: number): string[] }).render(120).join("\n");
@@ -656,12 +657,97 @@ describe("auto permissions tool gate", () => {
       stopReason: "stop",
     });
     expect(await pending).toBeUndefined();
+    const terminalInvalidations = invalidations;
     expect(render()).toContain("approved");
     expect(render()).toContain("authorized");
     await Bun.sleep(1);
     expect(render()).toContain("approved");
     expect(harnessState.widgets).toHaveLength(0);
     await harnessState.sessionShutdownHandler({}, harnessState.ctx);
+    expect(invalidations).toBe(terminalInvalidations);
+  });
+
+  test("releases tool-row invalidators after requesting revision", async () => {
+    useToolRowConfig();
+    reviewerText = '{"decision":"revise","reason":"use a feature branch"}';
+    const state = harness(["push this branch"], "tui");
+    await state.sessionStartHandler({}, state.ctx);
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    let invalidations = 0;
+    let lastComponent: any;
+    const renderState = {};
+    const render = () => {
+      lastComponent = state.bashTool.renderCall(
+        { command: "git push origin feature" },
+        theme,
+        {
+          state: renderState,
+          toolCallId: "call-revise",
+          invalidate: () => { invalidations++; },
+          lastComponent,
+          executionStarted: true,
+          isPartial: true,
+        },
+      );
+      return lastComponent.render(120).join("\n");
+    };
+
+    render();
+    const result = await state.toolCallHandler(
+      { toolName: "bash", toolCallId: "call-revise", input: { command: "git push origin feature" } },
+      state.ctx,
+    );
+    expect(result.reason).toContain("use a feature branch");
+    const terminalInvalidations = invalidations;
+    expect(render()).toContain("revision requested");
+    expect(render()).toContain("use a feature branch");
+    await state.sessionShutdownHandler({}, state.ctx);
+    expect(invalidations).toBe(terminalInvalidations);
+  });
+
+  test("retains ask-user invalidation until the blocked terminal transition", async () => {
+    useToolRowConfig();
+    reviewerText = '{"decision":"ask_user","reason":"approval was not explicit"}';
+    const state = harness(["check whether this can be pushed"], "tui");
+    await state.sessionStartHandler({}, state.ctx);
+    let resolveSelect!: (value: string) => void;
+    (state.ctx.ui as any).select = () => new Promise((resolve) => { resolveSelect = resolve; });
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    let invalidations = 0;
+    let lastComponent: any;
+    const renderState = {};
+    const render = () => {
+      lastComponent = state.bashTool.renderCall(
+        { command: "git push origin feature" },
+        theme,
+        {
+          state: renderState,
+          toolCallId: "call-ask-user",
+          invalidate: () => { invalidations++; },
+          lastComponent,
+          executionStarted: true,
+          isPartial: true,
+        },
+      );
+      return lastComponent.render(120).join("\n");
+    };
+
+    render();
+    const pending = state.toolCallHandler(
+      { toolName: "bash", toolCallId: "call-ask-user", input: { command: "git push origin feature" } },
+      state.ctx,
+    );
+    await Bun.sleep(0);
+    expect(render()).toContain("approval required");
+    const askUserInvalidations = invalidations;
+    resolveSelect("Block");
+    expect(await pending).toEqual({ block: true, reason: "Blocked by user" });
+    expect(invalidations).toBeGreaterThan(askUserInvalidations);
+    const terminalInvalidations = invalidations;
+    expect(render()).toContain("blocked");
+    expect(render()).toContain("blocked by user");
+    await state.sessionShutdownHandler({}, state.ctx);
+    expect(invalidations).toBe(terminalInvalidations);
   });
 
   test("falls back to the widget if another extension replaces bash later", async () => {
@@ -678,22 +764,36 @@ describe("auto permissions tool gate", () => {
     expect(harnessState.widgets).toHaveLength(2);
   });
 
-  test("releases unguarded bash row invalidators when execution ends", async () => {
+  test("does not re-register unguarded bash row invalidators after execution ends", async () => {
     useToolRowConfig();
     const harnessState = harness([], "tui");
     await harnessState.sessionStartHandler({}, harnessState.ctx);
     let invalidations = 0;
+    const state = {};
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
     harnessState.bashTool.renderCall(
       { command: "echo safe" },
-      { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+      theme,
       {
-        state: {},
+        state,
         toolCallId: "call-safe",
         invalidate: () => { invalidations++; },
         executionStarted: true,
+        isPartial: true,
       },
     );
     await harnessState.toolExecutionEndHandler({ toolName: "bash", toolCallId: "call-safe" });
+    harnessState.bashTool.renderCall(
+      { command: "echo safe" },
+      theme,
+      {
+        state,
+        toolCallId: "call-safe",
+        invalidate: () => { invalidations++; },
+        executionStarted: true,
+        isPartial: false,
+      },
+    );
     await harnessState.sessionShutdownHandler({}, harnessState.ctx);
     expect(invalidations).toBe(0);
   });
