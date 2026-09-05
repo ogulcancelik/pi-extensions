@@ -1,6 +1,14 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   AssistantMessageComponent,
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createPowerShellToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   getMarkdownTheme,
   SessionManager,
   ToolExecutionComponent,
@@ -16,7 +24,24 @@ import {
 } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as net from "node:net";
-import { getSocketPath, isPeekActive, type AgentInfo } from "./core.js";
+import {
+  getSocketPath,
+  isPeekActive,
+  RpcAssistantStreamState,
+  type AgentInfo,
+  type RpcAssistantStreamStatus,
+} from "./core.js";
+
+const TOOL_DEFINITION_FACTORIES = new Map<string, (cwd: string) => ToolDefinition>([
+  ["bash", createBashToolDefinition],
+  ["edit", createEditToolDefinition],
+  ["find", createFindToolDefinition],
+  ["grep", createGrepToolDefinition],
+  ["ls", createLsToolDefinition],
+  ["powershell", createPowerShellToolDefinition],
+  ["read", createReadToolDefinition],
+  ["write", createWriteToolDefinition],
+]);
 
 const OSC133_PROMPT_MARKER_RE = /\x1b\]133;[ABC]\x07/g;
 
@@ -42,7 +67,8 @@ export class SubagentPeekOverlay {
   private followMode = true;
   private socket: net.Socket | null = null;
   private socketBuffer = "";
-  private status: "thinking" | "streaming" | "tool" | "done" = "done";
+  private status: "thinking" | "streaming" | "calling" | "tool" | "done" = "done";
+  private readonly assistantStream = new RpcAssistantStreamState();
   private streamingComponent: AssistantMessageComponent | null = null;
   private streamingMessage: AssistantMessage | null = null;
   private readonly pendingTools = new Map<string, ToolExecutionComponent>();
@@ -116,7 +142,8 @@ export class SubagentPeekOverlay {
   }
 
   private createToolComponent(name: string, id: string, args: any): ToolExecutionComponent {
-    return new ToolExecutionComponent(name, id, args, {}, undefined, this.tui, this.cwd);
+    const definition = TOOL_DEFINITION_FACTORIES.get(name)?.(this.cwd);
+    return new ToolExecutionComponent(name, id, args, {}, definition, this.tui, this.cwd);
   }
 
   private getUserText(message: any): string {
@@ -166,7 +193,11 @@ export class SubagentPeekOverlay {
         if (text) this.chatContainer.addChild(new UserMessageComponent(text, getMarkdownTheme()));
       }
       if (event.partialMessage) {
-        this.streamingMessage = event.partialMessage;
+        const streamStatus: RpcAssistantStreamStatus = event.status === "streaming" || event.status === "calling"
+          ? event.status
+          : "thinking";
+        this.assistantStream.resume(event.partialMessage, streamStatus, event.toolArguments);
+        this.streamingMessage = this.assistantStream.message;
         this.streamingComponent = new AssistantMessageComponent(undefined, true, getMarkdownTheme());
         this.chatContainer.addChild(this.streamingComponent);
         this.streamingComponent.updateContent(this.streamingMessage!);
@@ -192,23 +223,33 @@ export class SubagentPeekOverlay {
         if (text) this.chatContainer.addChild(new UserMessageComponent(text, getMarkdownTheme()));
       } else if (event.message?.role === "assistant") {
         this.cleanupStreaming();
-        this.streamingMessage = event.message;
+        this.assistantStream.start(event.message);
+        this.streamingMessage = this.assistantStream.message;
         this.streamingComponent = new AssistantMessageComponent(undefined, true, getMarkdownTheme());
         this.chatContainer.addChild(this.streamingComponent);
         this.streamingComponent.updateContent(this.streamingMessage!);
         this.status = "thinking";
       }
-    } else if (event.type === "message_update" && event.message?.role === "assistant") {
+    } else if (event.type === "message_update") {
       this.ensureStreamingComponent();
-      this.streamingMessage = event.message;
-      this.streamingComponent!.updateContent(this.streamingMessage!);
       const delta = event.assistantMessageEvent;
-      if (delta?.type === "thinking_delta") this.status = "thinking";
-      if (delta?.type === "text_delta") this.status = "streaming";
+      const previous = delta?.type === "toolcall_end"
+        ? this.streamingMessage?.content[delta.contentIndex]
+        : undefined;
+      this.assistantStream.update(delta, event.message);
+      if (previous?.type === "toolCall" && previous.id !== delta.toolCall?.id) {
+        const component = this.pendingTools.get(previous.id);
+        if (component) this.chatContainer.removeChild(component);
+        this.pendingTools.delete(previous.id);
+      }
+      this.streamingMessage = this.assistantStream.message;
+      if (this.streamingMessage) this.streamingComponent!.updateContent(this.streamingMessage);
+      this.status = this.assistantStream.status;
       this.syncToolComponentsFromMessage();
     } else if (event.type === "message_end") {
       if (this.streamingComponent && event.message?.role === "assistant") {
-        this.streamingMessage = event.message;
+        this.assistantStream.finish(event.message);
+        this.streamingMessage = this.assistantStream.message;
         this.streamingComponent.updateContent(this.streamingMessage!);
         if (event.message.stopReason === "aborted" || event.message.stopReason === "error") {
           const errorMessage = event.message.errorMessage || "Error";
@@ -221,6 +262,7 @@ export class SubagentPeekOverlay {
         }
         this.streamingComponent = null;
         this.streamingMessage = null;
+        this.assistantStream.clear();
       }
     } else if (event.type === "tool_execution_start") {
       this.status = "tool";
@@ -276,6 +318,7 @@ export class SubagentPeekOverlay {
       stopReason: "stop" as any,
       timestamp: Date.now(),
     };
+    this.assistantStream.start(this.streamingMessage);
     this.streamingComponent = new AssistantMessageComponent(undefined, true, getMarkdownTheme());
     this.chatContainer.addChild(this.streamingComponent);
     this.streamingComponent.updateContent(this.streamingMessage);
@@ -283,6 +326,7 @@ export class SubagentPeekOverlay {
 
   private cleanupStreaming(): void {
     if (this.streamingComponent) this.chatContainer.removeChild(this.streamingComponent);
+    this.assistantStream.clear();
     this.streamingComponent = null;
     this.streamingMessage = null;
     this.pendingTools.clear();
@@ -350,8 +394,8 @@ export class SubagentPeekOverlay {
     const innerWidth = Math.max(20, width - 2);
     const title = ` ${this.info.taskName} `;
     const modelTag = this.modelName ? `[${truncateToWidth(this.modelName, 18)}] ` : "";
-    const statusIcon = { thinking: "◐", streaming: "●", tool: "◑", done: "✓" }[this.status];
-    const statusColor = { thinking: "warning", streaming: "success", tool: "accent", done: "success" }[this.status];
+    const statusIcon = { thinking: "◐", streaming: "●", calling: "◒", tool: "◑", done: "✓" }[this.status];
+    const statusColor = { thinking: "warning", streaming: "success", calling: "accent", tool: "accent", done: "success" }[this.status];
     const statusText = ` ${statusIcon} ${this.status} `;
     const headerWidth = visibleWidth(title) + visibleWidth(modelTag) + visibleWidth(statusText);
     const lines = [

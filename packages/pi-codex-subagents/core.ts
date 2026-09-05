@@ -7,6 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { parseStreamingJson, type AssistantMessage } from "@earendil-works/pi-ai";
 
 export const PACKAGE_BASENAME = "pi-codex-subagents";
 export const SUBAGENT_DIR = path.join(getAgentDir(), PACKAGE_BASENAME);
@@ -19,6 +20,8 @@ const SOCKET_DIR = path.join(TEMP_ROOT, "sockets");
 
 export const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 export const DEFAULT_RETENTION_DAYS = 7;
+export const DEFAULT_MODEL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
+const ACTIVITY_PERSIST_INTERVAL_MS = 5_000;
 export const DEFAULT_THINKING = "high";
 export const DEFAULT_TOOLS = "read,bash,grep,find,ls";
 const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.";
@@ -30,10 +33,12 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type AgentRuntimeStatus = "starting" | "running" | "completed" | "failed" | "interrupted";
 
 export interface SubagentConfig {
+  shortcut?: string;
   storageDir?: string;
   retentionDays?: number;
   models?: string[];
   modelsFromEnabledModels?: boolean;
+  modelResponseTimeoutMs?: number;
   defaults?: {
     skills?: string[];
     extensions?: string[];
@@ -149,6 +154,8 @@ interface LiveAgent {
   termination?: Promise<void>;
   candidateResponse: string;
   candidateError?: string;
+  modelResponseTimer?: ReturnType<typeof setTimeout>;
+  lastActivityPersistedAt: number;
 }
 
 export interface AgentCompletionEvent {
@@ -170,6 +177,7 @@ export interface AgentActivityEvent {
 export interface AgentManagerOptions {
   onActivityChange?: (event: AgentActivityEvent) => void;
   onUnclaimedCompletion?: (event: AgentCompletionEvent) => void;
+  modelResponseTimeoutMs?: number;
 }
 
 interface Waiter {
@@ -229,11 +237,18 @@ function normalizeConfig(value: unknown): SubagentConfig {
   const retentionDays = typeof raw.retentionDays === "number" && Number.isFinite(raw.retentionDays) && raw.retentionDays >= 0
     ? raw.retentionDays
     : undefined;
+  const modelResponseTimeoutMs = typeof raw.modelResponseTimeoutMs === "number"
+    && Number.isFinite(raw.modelResponseTimeoutMs)
+    && raw.modelResponseTimeoutMs >= 0
+    ? raw.modelResponseTimeoutMs
+    : undefined;
   return {
+    ...(typeof raw.shortcut === "string" && raw.shortcut.trim() ? { shortcut: raw.shortcut.trim() } : {}),
     ...(typeof raw.storageDir === "string" && raw.storageDir.trim() ? { storageDir: raw.storageDir.trim() } : {}),
     ...(retentionDays !== undefined ? { retentionDays } : {}),
     ...(stringList(raw.models) ? { models: stringList(raw.models) } : {}),
     ...(raw.modelsFromEnabledModels === true ? { modelsFromEnabledModels: true } : {}),
+    ...(modelResponseTimeoutMs !== undefined ? { modelResponseTimeoutMs } : {}),
     ...(defaults && Object.keys(defaults).length ? { defaults } : {}),
   };
 }
@@ -707,13 +722,106 @@ class SessionLogger {
   close(): void { this.stream?.end(); this.stream = null; }
 }
 
+export type RpcAssistantStreamStatus = "thinking" | "streaming" | "calling";
+
+export class RpcAssistantStreamState {
+  status: RpcAssistantStreamStatus = "thinking";
+  message: AssistantMessage | null = null;
+  private readonly toolArguments = new Map<number, string>();
+
+  start(message: AssistantMessage): void {
+    this.message = message;
+    this.status = "thinking";
+    this.toolArguments.clear();
+  }
+
+  update(delta: any, cumulativeMessage?: AssistantMessage): void {
+    if (cumulativeMessage?.role === "assistant") {
+      this.message = cumulativeMessage;
+    } else if (this.message) {
+      this.applyDelta(delta);
+    }
+    if (delta?.type === "thinking_start" || delta?.type === "thinking_delta" || delta?.type === "thinking_end") {
+      this.status = "thinking";
+    } else if (delta?.type === "text_start" || delta?.type === "text_delta" || delta?.type === "text_end") {
+      this.status = "streaming";
+    } else if (delta?.type === "toolcall_start" || delta?.type === "toolcall_delta" || delta?.type === "toolcall_end") {
+      this.status = "calling";
+    }
+  }
+
+  resume(
+    message: AssistantMessage,
+    status: RpcAssistantStreamStatus,
+    toolArguments: Array<[number, string]> = [],
+  ): void {
+    this.message = message;
+    this.status = status;
+    this.toolArguments.clear();
+    for (const [index, raw] of toolArguments) {
+      if (Number.isInteger(index) && index >= 0 && typeof raw === "string") this.toolArguments.set(index, raw);
+    }
+  }
+
+  snapshotToolArguments(): Array<[number, string]> {
+    return [...this.toolArguments.entries()];
+  }
+
+  finish(message?: AssistantMessage): void {
+    if (message?.role === "assistant") this.message = message;
+    this.toolArguments.clear();
+  }
+
+  clear(): void {
+    this.message = null;
+    this.toolArguments.clear();
+  }
+
+  private applyDelta(delta: any): void {
+    if (!this.message || !Number.isInteger(delta?.contentIndex) || delta.contentIndex < 0) return;
+    const index = delta.contentIndex;
+    const content = this.message.content as any[];
+    if (delta.type === "thinking_start") {
+      content[index] = { type: "thinking", thinking: "" };
+    } else if (delta.type === "thinking_delta") {
+      const block = content[index]?.type === "thinking" ? content[index] : { type: "thinking", thinking: "" };
+      block.thinking += typeof delta.delta === "string" ? delta.delta : "";
+      content[index] = block;
+    } else if (delta.type === "thinking_end") {
+      content[index] = { type: "thinking", thinking: typeof delta.content === "string" ? delta.content : "" };
+    } else if (delta.type === "text_start") {
+      content[index] = { type: "text", text: "" };
+    } else if (delta.type === "text_delta") {
+      const block = content[index]?.type === "text" ? content[index] : { type: "text", text: "" };
+      block.text += typeof delta.delta === "string" ? delta.delta : "";
+      content[index] = block;
+    } else if (delta.type === "text_end") {
+      content[index] = { type: "text", text: typeof delta.content === "string" ? delta.content : "" };
+    } else if (delta.type === "toolcall_start") {
+      this.toolArguments.set(index, "");
+      content[index] = { type: "toolCall", id: `streaming-${index}`, name: "tool", arguments: {} };
+    } else if (delta.type === "toolcall_delta") {
+      const raw = `${this.toolArguments.get(index) ?? ""}${typeof delta.delta === "string" ? delta.delta : ""}`;
+      this.toolArguments.set(index, raw);
+      const block = content[index]?.type === "toolCall"
+        ? content[index]
+        : { type: "toolCall", id: `streaming-${index}`, name: "tool", arguments: {} };
+      block.arguments = parseStreamingJson(raw);
+      content[index] = block;
+    } else if (delta.type === "toolcall_end" && delta.toolCall?.type === "toolCall") {
+      this.toolArguments.delete(index);
+      content[index] = delta.toolCall;
+    }
+  }
+}
+
 class EventBroadcaster {
   private server: net.Server | null = null;
   private connections: net.Socket[] = [];
   private readonly marker: PeekMarker = { pid: process.pid, startedAt: Date.now(), token: randomUUID() };
-  private status: "thinking" | "streaming" | "tool" | "done" = "thinking";
+  private status: RpcAssistantStreamStatus | "tool" | "done" = "thinking";
   private toolName?: string;
-  private partialMessage: any = null;
+  private readonly assistantStream = new RpcAssistantStreamState();
   private userMessage: any = null;
   private readonly activeTools = new Map<string, { toolCallId: string; toolName: string; args: any; partialResult?: any; result?: any; isError?: boolean }>();
 
@@ -738,7 +846,8 @@ class EventBroadcaster {
           type: "sync",
           status: this.status,
           toolName: this.toolName,
-          partialMessage: this.partialMessage,
+          partialMessage: this.assistantStream.message,
+          toolArguments: this.assistantStream.snapshotToolArguments(),
           userMessage: this.userMessage,
           activeTools: [...this.activeTools.values()],
         }) + "\n");
@@ -756,13 +865,11 @@ class EventBroadcaster {
     if (event.type === "message_start" && event.message?.role === "user") {
       this.userMessage = event.message;
     } else if (event.type === "message_start" && event.message?.role === "assistant") {
-      this.partialMessage = event.message;
+      this.assistantStream.start(event.message);
       this.status = "thinking";
-    } else if (event.type === "message_update" && event.message?.role === "assistant") {
-      this.partialMessage = event.message;
-      const delta = event.assistantMessageEvent;
-      if (delta?.type === "thinking_delta") this.status = "thinking";
-      if (delta?.type === "text_delta") this.status = "streaming";
+    } else if (event.type === "message_update") {
+      this.assistantStream.update(event.assistantMessageEvent, event.message);
+      this.status = this.assistantStream.status;
     } else if (event.type === "tool_execution_start") {
       this.status = "tool";
       this.toolName = event.toolName;
@@ -783,13 +890,14 @@ class EventBroadcaster {
         active.isError = event.isError ?? false;
       }
     } else if (event.type === "message_end") {
+      if (event.message?.role === "assistant") this.assistantStream.finish(event.message);
       if (event.message?.role === "toolResult" && event.message.toolCallId) {
         this.activeTools.delete(event.message.toolCallId);
       }
-      this.partialMessage = null;
+      this.assistantStream.clear();
       this.userMessage = null;
     } else if (event.type === "agent_settled") {
-      this.partialMessage = null;
+      this.assistantStream.clear();
       this.userMessage = null;
       this.activeTools.clear();
       this.status = "done";
@@ -1171,11 +1279,13 @@ export class AgentManager {
       exitPromise,
       resolveExit,
       candidateResponse: "",
+      lastActivityPersistedAt: info.updatedAt,
     };
     this.live.set(info.id, live);
     const decoder = new RpcJsonlDecoder();
     const finishProcess = (error?: Error) => {
       if (live.processFinished) return;
+      this.clearModelResponseTimer(live);
       live.processFinished = true;
       const persisted = readInfoFile(live.info.infoFile);
       if (persisted && FINAL_STATUSES.has(persisted.status)) {
@@ -1304,6 +1414,7 @@ export class AgentManager {
     delete live.info.error;
     delete live.info.completedAt;
     saveInfo(live.info);
+    live.lastActivityPersistedAt = live.info.updatedAt;
     this.notifyStatusChange(live.info);
     try {
       await this.sendCommand(live, { type: "prompt", message });
@@ -1319,6 +1430,32 @@ export class AgentManager {
       this.notifyStatusChange(live.info);
       throw error;
     }
+  }
+
+  private clearModelResponseTimer(live: LiveAgent): void {
+    if (live.modelResponseTimer) clearTimeout(live.modelResponseTimer);
+    delete live.modelResponseTimer;
+  }
+
+  private startModelResponseTimer(live: LiveAgent): void {
+    this.clearModelResponseTimer(live);
+    const timeoutMs = Math.max(
+      0,
+      this.options.modelResponseTimeoutMs ?? loadSubagentConfig().modelResponseTimeoutMs ?? DEFAULT_MODEL_RESPONSE_TIMEOUT_MS,
+    );
+    if (timeoutMs === 0) return;
+    live.modelResponseTimer = setTimeout(() => {
+      delete live.modelResponseTimer;
+      if (live.processFinished || live.expectedExit || live.finalizedRun) return;
+      const error = `Model response exceeded ${timeoutMs} ms without completing.`;
+      this.markFailed(live, error);
+      void this.terminateProcess(live).catch((terminationError) => {
+        live.logger.info("timeout", "failed to terminate timed-out child", {
+          error: terminationError instanceof Error ? terminationError.message : String(terminationError),
+        });
+      });
+    }, timeoutMs);
+    live.modelResponseTimer.unref?.();
   }
 
   private handleLine(live: LiveAgent, line: string): void {
@@ -1338,11 +1475,14 @@ export class AgentManager {
       else pending.reject(new Error(event.error || "RPC command failed"));
       return;
     }
-    const persisted = readInfoFile(live.info.infoFile);
-    if (persisted && FINAL_STATUSES.has(persisted.status) && persisted.status !== live.info.status) {
-      live.info = persisted;
-      live.finalizedRun = true;
-      return;
+    const highFrequencyUpdate = event.type === "message_update" || event.type === "tool_execution_update";
+    if (!highFrequencyUpdate) {
+      const persisted = readInfoFile(live.info.infoFile);
+      if (persisted && FINAL_STATUSES.has(persisted.status) && persisted.status !== live.info.status) {
+        live.info = persisted;
+        live.finalizedRun = true;
+        return;
+      }
     }
     if (live.finalizedRun || live.expectedExit) return;
     if (event.type === "agent_start") {
@@ -1351,16 +1491,32 @@ export class AgentManager {
       live.candidateResponse = "";
       live.candidateError = undefined;
       saveInfo(live.info);
+      live.lastActivityPersistedAt = live.info.updatedAt;
       this.notifyStatusChange(live.info);
       return;
     }
-    if (event.type === "message_update" || event.type === "tool_execution_start" || event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+    if (event.type === "message_start" && event.message?.role === "assistant") {
+      this.startModelResponseTimer(live);
+      return;
+    }
+    if (highFrequencyUpdate) {
+      live.info.status = "running";
+      live.info.lastActivity = Date.now();
+      if (live.info.lastActivity - live.lastActivityPersistedAt >= ACTIVITY_PERSIST_INTERVAL_MS) {
+        saveInfo(live.info);
+        live.lastActivityPersistedAt = live.info.updatedAt;
+      }
+      return;
+    }
+    if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
       live.info.status = "running";
       live.info.lastActivity = Date.now();
       saveInfo(live.info);
+      live.lastActivityPersistedAt = live.info.updatedAt;
       return;
     }
     if (event.type === "message_end" && event.message?.role === "assistant") {
+      this.clearModelResponseTimer(live);
       live.candidateResponse = extractTextFromMessage(event.message).trim();
       live.candidateError = event.message.stopReason === "error" || event.message.stopReason === "aborted"
         ? event.message.errorMessage || `Agent ended with ${event.message.stopReason}.`
@@ -1382,6 +1538,7 @@ export class AgentManager {
       return;
     }
     if (event.type === "agent_settled") {
+      this.clearModelResponseTimer(live);
       if (live.info.status === "interrupted" || live.finalizedRun) return;
       if (live.candidateError) this.markFailed(live, live.candidateError);
       else this.markCompleted(live);
@@ -1670,6 +1827,7 @@ export class AgentManager {
   }
 
   private terminateProcess(live: LiveAgent): Promise<void> {
+    this.clearModelResponseTimer(live);
     if (live.processFinished) return Promise.resolve();
     if (live.termination) return live.termination;
     live.termination = (async () => {

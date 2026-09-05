@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -17,12 +18,14 @@ mock.module("@earendil-works/pi-coding-agent", () => ({
 
 const {
   AgentManager,
+  RpcAssistantStreamState,
   RpcJsonlDecoder,
   consumeFirstMatchingMailboxEvent,
   formatAgentError,
   getAgent,
   getRunsDir,
   getSocketPath,
+  loadSubagentConfig,
   parentScopeKey,
   parseAgentDefinitionText,
   taskStorageKey,
@@ -35,6 +38,41 @@ test("formats the resolved subagent model and thinking for the detail overlay", 
     "Model: openai-codex/gpt-5.5",
     "Thinking: high",
   ]);
+});
+
+describe("RPC streaming", () => {
+  test("assembles delta-only messages and distinguishes tool calls from thinking", () => {
+    const stream = new RpcAssistantStreamState();
+    stream.start({
+      role: "assistant",
+      content: [],
+      api: "test",
+      provider: "test",
+      model: "fake",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {} },
+      stopReason: "pending",
+      timestamp: Date.now(),
+    });
+
+    stream.update({ type: "thinking_start", contentIndex: 0 });
+    stream.update({ type: "thinking_delta", contentIndex: 0, delta: "checking" });
+    expect(stream.status).toBe("thinking");
+    expect(stream.message?.content[0]).toMatchObject({ type: "thinking", thinking: "checking" });
+
+    stream.update({ type: "toolcall_start", contentIndex: 1 });
+    stream.update({ type: "toolcall_delta", contentIndex: 1, delta: '{"path":"src' });
+    stream.update({ type: "toolcall_delta", contentIndex: 1, delta: '/ui.rs"}' });
+    expect(stream.status).toBe("calling");
+    expect(stream.message?.content[0]).toMatchObject({ type: "thinking", thinking: "checking" });
+    expect(stream.message?.content[1]).toMatchObject({ type: "toolCall", arguments: { path: "src/ui.rs" } });
+
+    stream.update({
+      type: "toolcall_end",
+      contentIndex: 1,
+      toolCall: { type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/ui.rs" } },
+    });
+    expect(stream.message?.content[1]).toEqual({ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/ui.rs" } });
+  });
 });
 
 describe("RPC framing", () => {
@@ -92,6 +130,13 @@ describe("run storage", () => {
   test("uses persistent package storage by default", () => {
     fs.rmSync(configFile, { force: true });
     expect(getRunsDir()).toBe(path.join(packageDir, "runs"));
+  });
+
+  test("loads the model response timeout from package configuration", () => {
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify({ modelResponseTimeoutMs: 1234 }));
+    expect(loadSubagentConfig().modelResponseTimeoutMs).toBe(1234);
+    fs.rmSync(configFile, { force: true });
   });
 
   test("keeps legacy temporary runs discoverable", () => {
@@ -222,6 +267,31 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function readSocketEvents(socketPath: string, count: number): Promise<any[]> {
+  return await new Promise((resolve, reject) => {
+    const socket = net.connect(socketPath);
+    const events: any[] = [];
+    let buffer = "";
+    const finish = (error?: Error) => {
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(events);
+    };
+    socket.setTimeout(1000, () => finish(new Error("Timed out waiting for subagent events.")));
+    socket.on("error", (error) => finish(error));
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString();
+      while (events.length < count) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        events.push(JSON.parse(buffer.slice(0, newline)));
+        buffer = buffer.slice(newline + 1);
+      }
+      finish();
+    });
+  });
 }
 
 function spawnParams(parentSessionId: string, task_name: string, message: string) {
@@ -465,6 +535,75 @@ describe("child process lifecycle", () => {
     }
   });
 
+  test("broadcasts delta-only tool-call progress instead of reporting thinking", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "lifecycle-delta-only-progress";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    fs.rmSync(scope, { recursive: true, force: true });
+    const manager = new AgentManager({ modelResponseTimeoutMs: 2000 });
+    try {
+      await manager.spawnAgent(spawnParams(parentSessionId, "worker", "stream forever"));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const running = manager.getAgentInfo("worker", parentSessionId);
+      const [sync, update] = await readSocketEvents(getSocketPath(running.id), 2);
+      expect(sync.status).toBe("calling");
+      expect(sync.partialMessage.content[0]).toMatchObject({ type: "toolCall" });
+      expect(update.type).toBe("message_update");
+      expect(update.message).toBeUndefined();
+
+      const persistedActivity = manager.getAgentInfo("worker", parentSessionId).updatedAt;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(manager.getAgentInfo("worker", parentSessionId).updatedAt).toBe(persistedActivity);
+    } finally {
+      await manager.interruptAgent(parentSessionId, "worker");
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
+  test("does not apply the model response timeout to tool execution", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "lifecycle-tool-timeout";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    fs.rmSync(scope, { recursive: true, force: true });
+    const manager = new AgentManager({ modelResponseTimeoutMs: 50 });
+    try {
+      await manager.spawnAgent(spawnParams(parentSessionId, "worker", "tool hold"));
+      const pid = manager.getAgentInfo("worker", parentSessionId).childProcess!.pid;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(manager.getAgentInfo("worker", parentSessionId).status).toBe("running");
+      expect(pidAlive(pid)).toBe(true);
+    } finally {
+      await manager.interruptAgent(parentSessionId, "worker");
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
+  test("fails and terminates a model response that streams forever", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "lifecycle-model-response-timeout";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    fs.rmSync(scope, { recursive: true, force: true });
+    const manager = new AgentManager({ modelResponseTimeoutMs: 50 });
+    try {
+      await manager.spawnAgent(spawnParams(parentSessionId, "worker", "stream forever"));
+      const pid = manager.getAgentInfo("worker", parentSessionId).childProcess!.pid;
+      await waitUntil(() => {
+        const info = manager.getAgentInfo("worker", parentSessionId);
+        return info.status === "failed" && !info.childProcess;
+      });
+      expect(manager.readAgentResponse("worker", parentSessionId).error).toContain("Model response exceeded 50 ms");
+      expect(pidAlive(pid)).toBe(false);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
   test("interrupt terminates the child and clears runtime artifacts", async () => {
     process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
     const parentSessionId = "lifecycle-interrupt";
@@ -651,6 +790,50 @@ describe("completion delivery", () => {
 });
 
 describe("extension completion delivery and TUI", () => {
+  test.each([undefined, "", "ctrl+shift+a"])("opens the browser with optional shortcut %s", async (shortcut) => {
+    const configFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "config.json");
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify({ shortcut }));
+    const commands = new Map<string, any>();
+    const shortcuts = new Map<string, any>();
+    let shutdown: (() => Promise<void>) | undefined;
+    let menusOpened = 0;
+    const ctx: any = {
+      mode: "tui",
+      sessionManager: { getSessionId: () => "shortcut-test-parent" },
+      ui: {
+        async custom(create: any) {
+          const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+          const menu = create({ requestRender() {} }, theme, {}, () => {});
+          expect(menu.render(80).join("\n")).toContain("Subagents");
+          menusOpened++;
+          return undefined;
+        },
+      },
+    };
+    const { default: subagentExtension } = await import("./index.js");
+    try {
+      subagentExtension({
+        on(name: string, handler: any) { if (name === "session_shutdown") shutdown = handler; },
+        registerTool() {},
+        registerMessageRenderer() {},
+        registerCommand(name: string, command: any) { commands.set(name, command); },
+        registerShortcut(key: string, options: any) { shortcuts.set(key, options); },
+      } as any);
+      expect([...commands.keys()]).toEqual(["subagents"]);
+      expect([...shortcuts.keys()]).toEqual(shortcut ? [shortcut] : []);
+      await commands.get("subagents").handler("", ctx);
+      expect(menusOpened).toBe(1);
+      if (shortcut) {
+        await shortcuts.get(shortcut).handler(ctx);
+        expect(menusOpened).toBe(2);
+      }
+    } finally {
+      await shutdown?.();
+      fs.rmSync(configFile, { force: true });
+    }
+  });
+
   test("registers commands, renders one-line activity, and delivers bounded completions", async () => {
     process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
     const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
@@ -723,12 +906,11 @@ describe("extension completion delivery and TUI", () => {
       expect(notifications).toEqual(['spawn_agent models not available: typo/nope']);
       // The values live in the schema, but the description has to say the capability exists.
       expect(tools.get("spawn_agent").description).toContain("`model` takes one of the values its schema lists");
-      expect(commands.has("agents")).toBe(true);
-      expect(commands.has("subagent")).toBe(true);
-      expect(commands.has("subagents")).toBe(true);
+      expect([...commands.keys()]).toEqual(["subagents"]);
       expect(renderers.has("pi-codex-subagent-completion")).toBe(true);
 
       fs.mkdirSync(scope, { recursive: true });
+      const historyCreatedAt = Date.now();
       for (let index = 0; index < 12; index++) {
         const id = `44444444-4444-4444-8444-${String(index).padStart(12, "0")}`;
         fs.writeFileSync(path.join(scope, `${id}.info.json`), JSON.stringify({
@@ -738,10 +920,44 @@ describe("extension completion delivery and TUI", () => {
           parentSessionId,
           status: index === 0 ? "running" : "completed",
           lastTaskMessage: `private task context ${index}`,
-          createdAt: Date.now() + index,
-          updatedAt: Date.now() + index,
+          provider: "test",
+          modelId: index === 0 ? "MiniMax-M3" : "a-model-name-that-is-longer-than-the-column",
+          thinking: index === 0 ? "high" : "medium",
+          createdAt: historyCreatedAt - index,
+          updatedAt: historyCreatedAt - index,
         }));
       }
+      let browser: any;
+      ctx.ui.custom = async (create: any) => {
+        browser = create({ requestRender() {} }, {
+          fg: (_color: string, text: string) => text,
+          bold: (text: string) => text,
+        }, {}, () => {});
+        return undefined;
+      };
+      await commands.get("subagents").handler("", ctx);
+      const browserLines = browser.render(120);
+      const firstRowIndex = browserLines.findIndex((line: string) => line.includes("/history/0"));
+      const firstRow = browserLines[firstRowIndex];
+      expect(firstRow).toMatch(/\/history\/0\s+running\s+\S+\s+MiniMax-M3\s+high/);
+      expect(browserLines[firstRowIndex + 1]).toContain("private task context 0");
+      const secondRow = browserLines.find((line: string) => line.includes("/history/1 "));
+      expect(secondRow.indexOf("a-model-name")).toBe(firstRow.indexOf("MiniMax-M3"));
+      expect(visibleWidth(secondRow.slice(0, secondRow.indexOf("medium"))))
+        .toBe(visibleWidth(firstRow.slice(0, firstRow.indexOf("high"))));
+      expect(secondRow).not.toContain("a-model-name-that-is-longer-than-the-column");
+      for (const width of [80, 50, 32]) {
+        expect(browser.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(true);
+      }
+      const narrowRow = browser.render(50).find((line: string) => line.includes("/history/0"));
+      expect(narrowRow).toContain("high");
+      expect(narrowRow).not.toContain("MiniMax-M3");
+      browser.handleInput("\t");
+      const allSessionRow = browser.render(80).find((line: string) => line.includes("/history/0"));
+      expect(allSessionRow).toContain("MiniMax-M3");
+      expect(allSessionRow).toContain("high");
+      expect(allSessionRow.trimEnd()).toEndWith(parentSessionId.slice(-8));
+
       const firstAgentPage = await tools.get("list_agents").execute("list-1", {}, undefined, undefined, ctx);
       const firstAgentPayload = JSON.parse(firstAgentPage.content[0].text);
       expect(firstAgentPayload).toMatchObject({ total: 12, returned: 10, offset: 0, limit: 10, next_offset: 10 });
