@@ -21,6 +21,7 @@ export interface AutoPermissionsConfig {
   systemPrompt: string;
   reviewEvidence: {
     projectInstructions: boolean;
+    userAnswerTools: string[];
   };
   rules: Gate[];
   ui: {
@@ -102,7 +103,7 @@ function resolvePrompt(raw: Record<string, unknown>, path: string): string {
 }
 
 function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsConfig["reviewEvidence"] {
-  if (raw.reviewEvidence === undefined) return { projectInstructions: false };
+  if (raw.reviewEvidence === undefined) return { projectInstructions: false, userAnswerTools: [] };
   if (!raw.reviewEvidence || typeof raw.reviewEvidence !== "object" || Array.isArray(raw.reviewEvidence)) {
     throw new Error("reviewEvidence must be an object");
   }
@@ -110,7 +111,14 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
   if (evidence.projectInstructions !== undefined && typeof evidence.projectInstructions !== "boolean") {
     throw new Error("reviewEvidence.projectInstructions must be boolean");
   }
-  return { projectInstructions: evidence.projectInstructions === true };
+  const rawTools = evidence.userAnswerTools === undefined ? [] : evidence.userAnswerTools;
+  if (!Array.isArray(rawTools) || rawTools.some((tool) => typeof tool !== "string" || !tool.trim())) {
+    throw new Error("reviewEvidence.userAnswerTools must be an array of non-empty strings");
+  }
+  return {
+    projectInstructions: evidence.projectInstructions === true,
+    userAnswerTools: [...new Set((rawTools as string[]).map((tool) => tool.trim()))],
+  };
 }
 
 function resolveUi(raw: Record<string, unknown>): AutoPermissionsConfig["ui"] {
