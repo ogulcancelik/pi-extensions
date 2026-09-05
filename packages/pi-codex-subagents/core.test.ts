@@ -143,6 +143,25 @@ describe("run storage", () => {
     }
   });
 
+  test("ignores malformed info records during reconciliation", async () => {
+    fs.rmSync(configFile, { force: true });
+    const parentSessionId = "malformed-info";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    const malformed = path.join(scope, "33333333-3333-4333-8333-333333333333.info.json");
+    fs.rmSync(scope, { recursive: true, force: true });
+    fs.mkdirSync(scope, { recursive: true });
+    fs.writeFileSync(malformed, "{}");
+    const manager = new AgentManager();
+    try {
+      await manager.ready();
+      expect(manager.listAgents(undefined, parentSessionId)).toEqual([]);
+      expect(fs.existsSync(malformed)).toBe(true);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+    }
+  });
+
   test("removes expired runs and outputs using configurable retention", () => {
     fs.mkdirSync(packageDir, { recursive: true });
     fs.rmSync(fixtureDir, { recursive: true, force: true });

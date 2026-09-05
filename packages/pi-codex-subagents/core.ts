@@ -416,7 +416,7 @@ function readInfos(directory: string): AgentInfo[] {
     .filter((name) => name.endsWith(".info.json"))
     .flatMap((name) => {
       const info = readInfoFile(path.join(directory, name));
-      return info ? [info] : [];
+      return info && typeof info.id === "string" && AGENT_ID_PATTERN.test(info.id) ? [info] : [];
     });
 }
 
