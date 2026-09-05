@@ -244,7 +244,13 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
           model,
           thinking: params.thinking,
         });
-        return textResult(`Spawned ${result.task_name}.`, result);
+        const info = manager.getAgentInfo(result.task_name, parentSessionId(ctx));
+        return textResult(`Spawned ${result.task_name}.`, {
+          ...result,
+          provider: info.provider,
+          modelId: info.modelId,
+          thinking: info.thinking,
+        });
       } catch (error) {
         throw new Error(`spawn_agent failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -254,7 +260,11 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     },
     renderResult(result: any, _options: any, theme: Theme) {
       if (result.isError) return new Text(theme.fg("error", `✗ ${result.content?.[0]?.text || "failed"}`), 0, 0);
-      return new Text(theme.fg("success", `✓ ${result.details?.task_name || "spawned"}`), 0, 0);
+      const model = result.details?.provider && result.details?.modelId
+        ? ` · ${result.details.provider}/${result.details.modelId}`
+        : "";
+      const thinking = result.details?.thinking ? ` · ${result.details.thinking}` : "";
+      return new Text(theme.fg("success", `✓ ${result.details?.task_name || "spawned"}${model}${thinking}`), 0, 0);
     },
   };
 

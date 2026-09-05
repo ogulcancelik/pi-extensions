@@ -24,6 +24,13 @@ function stripPromptMarkers(lines: string[]): string[] {
   return lines.map((line) => line.replace(OSC133_PROMPT_MARKER_RE, ""));
 }
 
+export function formatAgentSpecLines(info: Pick<AgentInfo, "provider" | "modelId" | "thinking">): string[] {
+  return [
+    `Model: ${info.provider}/${info.modelId}`,
+    `Thinking: ${info.thinking || "off"}`,
+  ];
+}
+
 export class SubagentPeekOverlay {
   private readonly sessionFile: string;
   private readonly cwd: string;
@@ -359,7 +366,8 @@ export class SubagentPeekOverlay {
     let contentLines: string[];
     if (this.cachedLines && this.cachedWidth === innerWidth) contentLines = this.cachedLines;
     else {
-      contentLines = stripPromptMarkers(this.chatContainer.render(innerWidth));
+      const specLines = formatAgentSpecLines(this.info).map((line) => this.theme.fg("dim", line));
+      contentLines = [...specLines, "", ...stripPromptMarkers(this.chatContainer.render(innerWidth))];
       this.cachedLines = contentLines;
       this.cachedWidth = innerWidth;
     }
