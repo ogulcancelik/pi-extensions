@@ -1179,8 +1179,7 @@ export class AgentManager {
       live.processFinished = true;
       const persisted = readInfoFile(live.info.infoFile);
       if (persisted && FINAL_STATUSES.has(persisted.status)) {
-        live.info = persisted;
-        live.finalizedRun = true;
+        this.adoptTerminalState(live, persisted);
       }
       for (const [requestId, pending] of live.pending) {
         clearTimeout(pending.timer);
@@ -1220,8 +1219,7 @@ export class AgentManager {
       if (!live.expectedExit) {
         const persisted = readInfoFile(live.info.infoFile);
         if (persisted && FINAL_STATUSES.has(persisted.status)) {
-          live.info = persisted;
-          live.finalizedRun = true;
+          this.adoptTerminalState(live, persisted);
         } else if (!live.finalizedRun) {
           this.markFailed(live, error.message);
         }
@@ -1340,8 +1338,7 @@ export class AgentManager {
     }
     const persisted = readInfoFile(live.info.infoFile);
     if (persisted && FINAL_STATUSES.has(persisted.status) && persisted.status !== live.info.status) {
-      live.info = persisted;
-      live.finalizedRun = true;
+      this.adoptTerminalState(live, persisted);
       return;
     }
     if (live.finalizedRun || live.expectedExit) return;
@@ -1389,6 +1386,22 @@ export class AgentManager {
         live.logger.info("hibernate", "failed to terminate settled child", { error: error instanceof Error ? error.message : String(error) });
       });
     }
+  }
+
+  private adoptTerminalState(live: LiveAgent, persisted: AgentInfo): void {
+    if (live.finalizedRun) return;
+    live.info = persisted;
+    live.finalizedRun = true;
+    this.notifyStatusChange(persisted);
+    this.pushMailbox({
+      id: randomUUID(),
+      parentSessionId: persisted.parentSessionId,
+      agentName: persisted.canonicalName,
+      status: persisted.status,
+      finalResponse: persisted.finalResponse,
+      error: persisted.error,
+      createdAt: Date.now(),
+    });
   }
 
   private markCompleted(live: LiveAgent): void {

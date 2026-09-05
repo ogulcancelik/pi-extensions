@@ -559,6 +559,90 @@ describe("completion delivery", () => {
     }
   });
 
+  test("delivers an externally persisted terminal state to an active waiter exactly once", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "completion-external-terminal";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    fs.rmSync(scope, { recursive: true, force: true });
+    const completions: any[] = [];
+    const manager = new AgentManager({ onUnclaimedCompletion: (event: any) => completions.push(event) });
+    try {
+      await manager.spawnAgent(spawnParams(parentSessionId, "worker", "hold external"));
+      const wait = manager.waitAgent(parentSessionId, ["worker"]);
+      const persisted = manager.getAgentInfo("worker", parentSessionId);
+      persisted.status = "interrupted";
+      persisted.lastActivity = Date.now();
+      fs.writeFileSync(persisted.infoFile, JSON.stringify(persisted, null, 2));
+
+      // Force terminal-state observation through stdin failure before process exit.
+      const live = (manager as any).live.get(persisted.id);
+      live.proc.stdin.emit("error", new Error("forced stdin race"));
+      expect((await wait).event).toMatchObject({ agentName: "/worker", status: "interrupted" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(completions).toEqual([]);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
+  test("delivers an adopted terminal state observed through child output to wait_all_agents", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "completion-external-output";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    fs.rmSync(scope, { recursive: true, force: true });
+    const completions: any[] = [];
+    const manager = new AgentManager({ onUnclaimedCompletion: (event: any) => completions.push(event) });
+    try {
+      await manager.spawnAgent(spawnParams(parentSessionId, "worker", "hold external"));
+      const wait = manager.waitAllAgents(parentSessionId, ["worker"]);
+      const persisted = manager.getAgentInfo("worker", parentSessionId);
+      persisted.status = "completed";
+      persisted.finalResponse = "persisted response";
+      persisted.completedAt = Date.now();
+      fs.writeFileSync(persisted.infoFile, JSON.stringify(persisted, null, 2));
+
+      const live = (manager as any).live.get(persisted.id);
+      live.proc.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "agent_start" })}\n`));
+      expect((await wait).responses).toEqual([
+        expect.objectContaining({ agent_name: "/worker", status: "completed", finalResponse: "persisted response" }),
+      ]);
+      expect(completions).toEqual([]);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
+  test("automatically delivers an adopted terminal state observed through process exit once", async () => {
+    process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
+    const parentSessionId = "completion-external-exit";
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    fs.rmSync(scope, { recursive: true, force: true });
+    const completions: any[] = [];
+    const manager = new AgentManager({ onUnclaimedCompletion: (event: any) => completions.push(event) });
+    try {
+      await manager.spawnAgent(spawnParams(parentSessionId, "worker", "hold external"));
+      const persisted = manager.getAgentInfo("worker", parentSessionId);
+      persisted.status = "failed";
+      persisted.error = "persisted failure";
+      persisted.completedAt = Date.now();
+      fs.writeFileSync(persisted.infoFile, JSON.stringify(persisted, null, 2));
+
+      process.kill(persisted.childProcess!.pid, "SIGKILL");
+      await waitUntil(() => completions.length === 1);
+      expect(completions[0]).toMatchObject({ agentName: "/worker", status: "failed", error: "persisted failure" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(completions).toHaveLength(1);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+      delete process.env.PI_SUBAGENT_PI_BIN;
+    }
+  });
+
   test("suppresses automatic delivery while wait tools claim completions", async () => {
     process.env.PI_SUBAGENT_PI_BIN = FAKE_RPC_CHILD;
     const parentSessionId = "completion-waits";
