@@ -83,6 +83,16 @@ function toRemotePath(path: string, localCwd: string, remoteCwd: string): string
 	return `${normalizeRemoteDir(remoteCwd)}/${relativePath}`;
 }
 
+function withCwd<T>(ctx: T, cwd: string): T {
+	if (ctx === undefined || ctx === null || typeof ctx !== "object") {
+		return ctx;
+	}
+	const copy = Object.defineProperties({}, Object.getOwnPropertyDescriptors(ctx));
+	delete (copy as Record<string, unknown>).cwd;
+	Object.defineProperty(copy, "cwd", { value: cwd, enumerable: true, configurable: true, writable: true });
+	return copy;
+}
+
 function parseSshConfigProfiles(): SshProfile[] {
 	if (!existsSync(SSH_CONFIG_PATH)) {
 		return [];
@@ -345,7 +355,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
 			const tool = createReadToolDefinition(target.remoteCwd, { operations: createRemoteReadOps(target) });
-			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
+			return tool.execute(toolCallId, params, signal, onUpdate, withCwd(ctx, target.remoteCwd));
 		},
 		renderCall(args, theme) {
 			const path = typeof args?.path === "string" ? args.path : "...";
@@ -369,7 +379,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
 			const tool = createWriteToolDefinition(target.remoteCwd, { operations: createRemoteWriteOps(target) });
-			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
+			return tool.execute(toolCallId, params, signal, onUpdate, withCwd(ctx, target.remoteCwd));
 		},
 		renderCall(args, theme) {
 			const path = typeof args?.path === "string" ? args.path : "...";
@@ -402,7 +412,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 				path: toLocalEditPath(params.path, target.remoteCwd),
 			};
 			const tool = createEditToolDefinition(localCwd, { operations: createRemoteEditOps(target, localCwd) });
-			return tool.execute(toolCallId, transformedParams, signal, onUpdate, ctx);
+			return tool.execute(toolCallId, transformedParams, signal, onUpdate, withCwd(ctx, localCwd));
 		},
 		renderCall(args, theme) {
 			const path = typeof args?.path === "string" ? args.path : "...";
@@ -426,7 +436,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
 			const tool = createBashToolDefinition(target.remoteCwd, { operations: createRemoteBashOps(target) });
-			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
+			return tool.execute(toolCallId, params, signal, onUpdate, withCwd(ctx, target.remoteCwd));
 		},
 		renderCall(args, theme, context) {
 			const command = typeof args?.command === "string" ? args.command : "...";

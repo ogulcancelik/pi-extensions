@@ -75,6 +75,7 @@ Optional configuration lives at:
 {
   "storageDir": "~/.local/state/pi-codex-subagents/runs",
   "retentionDays": 7,
+  "modelResponseTimeoutMs": 600000,
   "models": ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-4-6"],
   "modelsFromEnabledModels": true,
   "defaults": {
@@ -85,6 +86,10 @@ Optional configuration lives at:
 ```
 
 `storageDir` accepts an absolute path, `~/...`, or a path relative to the package configuration directory. By default runs are stored in `~/.pi/agent/pi-codex-subagents/runs`. `retentionDays` defaults to `7`; expired runs and oversized tool outputs are removed when the extension loads. Set it to `0` to disable automatic cleanup. Runtime sockets remain in the operating system temporary directory and are removed when agents stop.
+
+`modelResponseTimeoutMs` limits one model response, from assistant message start to completion, and defaults to 10 minutes. It does not limit tool execution or the agent's total runtime. A response that keeps streaming forever is failed and its child process is terminated so waiters cannot block indefinitely. Set it to `0` to disable this guard.
+
+`shortcut` optionally binds a key to the subagent browser, for example `"shortcut": "ctrl+shift+a"`. No shortcut is assigned by default; omit it or set it to `""` to leave it unbound. Run `/reload` after changing it.
 
 Configuration is read when agents spawn, while cleanup runs when the extension loads. Restart Pi after changing `storageDir` or `retentionDays` so storage lookup and cleanup use the same configuration throughout the process.
 
@@ -121,7 +126,7 @@ A child completion or failure is delivered automatically to its parent session a
 
 While agents are starting or running, a compact one-line indicator appears above the editor. It shows the task name for one active agent or a count for multiple agents and points to `/subagents`. The indicator disappears when no agents are active.
 
-`/subagents` and `/agents` browse agents in the current session. Press Tab to switch to the read-only all-sessions view. `/subagent <task-name>` opens one current-session agent directly.
+`/subagents` opens the agent browser for the current session. Each row shows the task name, status, elapsed time, model, and thinking level, with the task preview underneath. Long names are shortened to fit the terminal. Press Tab to switch to the read-only all-sessions view, then Enter to open an agent.
 
 The overlay uses the child working directory for tool rendering and synchronizes in-progress output when opened midway through a run. Use Left/Right to switch between agents in the current browser scope.
 

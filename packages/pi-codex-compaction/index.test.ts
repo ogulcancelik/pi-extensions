@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import codexCompactionExtension from "./index.ts";
+import { needsLegacyCompactionFallback, registerCodexCompactionExtension } from "./index.ts";
 import {
 	buildReplacementHistory,
 	effectiveInputForBranch,
@@ -48,11 +48,11 @@ function userEntry(id: string, text: string): SessionEntry {
 	} as SessionEntry;
 }
 
-function extensionHarness(initialBranch: SessionEntry[]) {
+function extensionHarness(initialBranch: SessionEntry[], hostVersion = "0.84.4") {
 	const handlers = new Map<string, (...args: any[]) => any>();
 	const entryRenderers = new Map<string, (...args: any[]) => any>();
 	let branch = initialBranch;
-	let aborted = false;
+	let abortCount = 0;
 	let hasPendingMessages = false;
 	let idle = false;
 	let usageTokens = 40_000;
@@ -83,7 +83,7 @@ function extensionHarness(initialBranch: SessionEntry[]) {
 			sentUserMessages.push({ content, options });
 		},
 	} as any;
-	codexCompactionExtension(pi);
+	registerCodexCompactionExtension(pi, hostVersion);
 
 	const context = {
 		model,
@@ -92,7 +92,7 @@ function extensionHarness(initialBranch: SessionEntry[]) {
 		signal: new AbortController().signal,
 		hasUI: true,
 		ui: { notify: (message: string) => notifications.push(message) },
-		abort: () => { aborted = true; },
+		abort: () => { abortCount++; },
 		compact: (options: any) => { compactionRequests.push(options); },
 		isIdle: () => idle,
 		isProjectTrusted: () => false,
@@ -122,7 +122,8 @@ function extensionHarness(initialBranch: SessionEntry[]) {
 		setIdle(value: boolean) { idle = value; },
 		setUsageTokens(tokens: number) { usageTokens = tokens; },
 		getBranch() { return branch; },
-		get aborted() { return aborted; },
+		get aborted() { return abortCount > 0; },
+		get abortCount() { return abortCount; },
 		entryRenderers,
 		notifications,
 		compactionRequests,
@@ -334,7 +335,7 @@ describe("pi-codex-compaction", () => {
 		expect(rendered).toContain("OpenAI compaction complete");
 	});
 
-	test("does not compact inside the provider request hook", async () => {
+	test("does not compact or abort inside the provider request hook", async () => {
 		let called = false;
 		globalThis.fetch = (async () => {
 			called = true;
@@ -351,34 +352,64 @@ describe("pi-codex-compaction", () => {
 
 		expect(result).toBeUndefined();
 		expect(called).toBe(false);
+		expect(harness.aborted).toBe(false);
 		expect(harness.getBranch()).toEqual([entry]);
 	});
 
-	test("aborts at 90 percent, compacts after settlement, and visibly continues", () => {
-		const entry = userEntry("user-1", "continue the task");
-		const harness = extensionHarness([entry]);
+	test("enables the compatibility path only before Pi 0.84.4", () => {
+		expect(needsLegacyCompactionFallback("0.84.3")).toBe(true);
+		expect(needsLegacyCompactionFallback("v0.83.0")).toBe(true);
+		expect(needsLegacyCompactionFallback("0.84.4")).toBe(false);
+		expect(needsLegacyCompactionFallback("0.85.0")).toBe(false);
+		expect(needsLegacyCompactionFallback("development")).toBe(false);
+	});
+
+	test("leaves compaction timing and continuation to current Pi", () => {
+		const harness = extensionHarness([userEntry("user-1", "continue the task")], "0.84.4");
+
+		expect(harness.handlers.has("turn_end")).toBe(false);
+		expect(harness.handlers.has("agent_settled")).toBe(false);
+		expect(harness.handlers.has("session_compact")).toBe(false);
+	});
+
+	test("legacy Pi stops before the next provider request, compacts, and resumes", async () => {
+		const harness = extensionHarness([userEntry("user-1", "continue the task")], "0.84.3");
 		harness.setUsageTokens(180_000);
 
 		harness.handlers.get("turn_end")!({}, harness.context);
-		expect(harness.aborted).toBe(true);
-		expect(harness.compactionRequests).toHaveLength(0);
+		expect(harness.aborted).toBe(false);
+		await harness.handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } }, harness.context);
+		expect(harness.abortCount).toBe(1);
 
 		harness.setIdle(true);
 		harness.handlers.get("agent_settled")!({}, harness.context);
 		expect(harness.compactionRequests).toHaveLength(1);
 		harness.compactionRequests[0].onComplete({});
-
 		expect(harness.sentUserMessages).toEqual([{
 			content: "Compaction completed. Continue.",
 			options: undefined,
 		}]);
 	});
 
-	test("uses Pi threshold compaction when it finishes before settlement", () => {
-		const entry = userEntry("user-1", "continue the task");
-		const harness = extensionHarness([entry]);
+	test("legacy Pi blocks repeated provider attempts without duplicate warnings", async () => {
+		const harness = extensionHarness([userEntry("user-1", "continue the task")], "0.84.3");
 		harness.setUsageTokens(180_000);
 		harness.handlers.get("turn_end")!({}, harness.context);
+
+		await harness.handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } }, harness.context);
+		await harness.handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } }, harness.context);
+
+		expect(harness.abortCount).toBe(2);
+		expect(harness.notifications).toEqual([
+			"Stopping before the next OpenAI Codex request to compact context.",
+		]);
+	});
+
+	test("legacy Pi reuses a native threshold compaction that wins the race", async () => {
+		const harness = extensionHarness([userEntry("user-1", "continue the task")], "0.84.3");
+		harness.setUsageTokens(180_000);
+		harness.handlers.get("turn_end")!({}, harness.context);
+		await harness.handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } }, harness.context);
 
 		harness.handlers.get("session_compact")!({
 			reason: "threshold",
@@ -396,11 +427,11 @@ describe("pi-codex-compaction", () => {
 		}]);
 	});
 
-	test("does not add a continuation when overflow recovery will retry", () => {
-		const entry = userEntry("user-1", "continue the task");
-		const harness = extensionHarness([entry]);
+	test("legacy Pi defers continuation to overflow recovery", async () => {
+		const harness = extensionHarness([userEntry("user-1", "continue the task")], "0.84.3");
 		harness.setUsageTokens(180_000);
 		harness.handlers.get("turn_end")!({}, harness.context);
+		await harness.handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } }, harness.context);
 
 		harness.handlers.get("session_compact")!({
 			reason: "overflow",
@@ -415,25 +446,38 @@ describe("pi-codex-compaction", () => {
 		expect(harness.sentUserMessages).toEqual([]);
 	});
 
-	test("does not interrupt below the configured threshold", () => {
-		const entry = userEntry("user-1", "continue the task");
-		const harness = extensionHarness([entry]);
-		harness.setUsageTokens(179_999);
-		harness.handlers.get("turn_end")!({}, harness.context);
-		expect(harness.aborted).toBe(false);
-	});
-
-
-	test("does not auto-continue when input is already queued", () => {
-		const entry = userEntry("user-1", "continue the task");
-		const harness = extensionHarness([entry]);
+	test("legacy Pi compacts silently when the run ends naturally", () => {
+		const harness = extensionHarness([userEntry("user-1", "finish the task")], "0.84.3");
 		harness.setUsageTokens(180_000);
 		harness.handlers.get("turn_end")!({}, harness.context);
+
+		harness.setIdle(true);
+		harness.handlers.get("agent_settled")!({}, harness.context);
+		expect(harness.compactionRequests).toHaveLength(1);
+		harness.compactionRequests[0].onComplete({});
+		expect(harness.sentUserMessages).toEqual([]);
+	});
+
+	test("legacy Pi does not resume over queued input", async () => {
+		const harness = extensionHarness([userEntry("user-1", "continue the task")], "0.84.3");
+		harness.setUsageTokens(180_000);
+		harness.handlers.get("turn_end")!({}, harness.context);
+		await harness.handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } }, harness.context);
 		harness.setIdle(true);
 		harness.handlers.get("agent_settled")!({}, harness.context);
 		harness.setHasPendingMessages(true);
 		harness.compactionRequests[0].onComplete({});
 		expect(harness.sentUserMessages).toEqual([]);
+	});
+
+	test("legacy Pi stays idle below its compatibility threshold", () => {
+		const harness = extensionHarness([userEntry("user-1", "continue the task")], "0.84.3");
+		harness.setUsageTokens(179_999);
+		harness.handlers.get("turn_end")!({}, harness.context);
+		harness.handlers.get("agent_settled")!({}, harness.context);
+
+		expect(harness.aborted).toBe(false);
+		expect(harness.compactionRequests).toHaveLength(0);
 	});
 
 	test("leaves non-Codex providers untouched", async () => {

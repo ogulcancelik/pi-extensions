@@ -31,6 +31,43 @@ input.on("line", (line) => {
     send({ type: "response", id: command.id, success: true, data: {} });
     send({ type: "agent_start" });
     if (String(command.message).startsWith("hold")) return;
+    if (String(command.message).startsWith("stream")) {
+      send({
+        type: "message_start",
+        message: {
+          role: "assistant",
+          content: [],
+          api: "test",
+          provider: "test",
+          model: "fake",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {} },
+          stopReason: "pending",
+          timestamp: Date.now(),
+        },
+      });
+      send({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 0 } });
+      send({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: '{"command":"' } });
+      setInterval(() => {
+        send({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: " \\n" } });
+      }, 5);
+      return;
+    }
+    if (String(command.message).startsWith("tool hold")) {
+      const assistant = {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "sleep" } }],
+        api: "test",
+        provider: "test",
+        model: "fake",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {} },
+        stopReason: "toolUse",
+        timestamp: Date.now(),
+      };
+      send({ type: "message_start", message: { ...assistant, content: [] } });
+      send({ type: "message_end", message: assistant });
+      send({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args: { command: "sleep" } });
+      return;
+    }
     if (String(command.message).startsWith("crash")) {
       setTimeout(() => process.exit(23), 20);
       return;
