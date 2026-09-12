@@ -37,6 +37,9 @@
       "./index.ts"
     ]
   },
+  "scripts": {
+    "test": "bun test"
+  },
   "files": [
     "index.ts",
     "README.md",

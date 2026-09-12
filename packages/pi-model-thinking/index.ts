@@ -1,7 +1,6 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 const CONFIG_FILENAME = "model-thinking.json";
 
@@ -24,7 +23,9 @@ let activeModelKey: string | undefined;
 let lastProgrammaticSet: { modelKey: string; level: ThinkingLevel } | undefined;
 
 function configPath(): string {
-	return join(homedir(), ".pi", "agent", CONFIG_FILENAME);
+	const override = process.env.PI_MODEL_THINKING_CONFIG;
+	if (override) return resolve(override);
+	return join(getAgentDir(), CONFIG_FILENAME);
 }
 
 function isThinkingLevel(value: unknown): value is ThinkingLevel {
@@ -68,6 +69,7 @@ function loadConfig(): ModelThinkingConfig {
 function saveConfig(config: ModelThinkingConfig): void {
 	const path = configPath();
 	try {
+		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
 		cachedConfig = config;
 		cachedPath = path;
@@ -208,9 +210,9 @@ export default function modelThinkingExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Only record if this model is managed by our config
-		if (!isManaged(ctx)) return;
-
+		// A user-driven change (Shift+Tab) is the opt-in: record it for this model,
+		// creating the config file on first use. Guarding on isManaged() here would
+		// deadlock, since a model can only become managed by first being recorded.
 		updateConfigForModel(ctx, event.level);
 	});
 
