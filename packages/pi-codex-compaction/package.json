@@ -46,5 +46,8 @@
     "native-compaction.ts",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.0"
+  }
 }
