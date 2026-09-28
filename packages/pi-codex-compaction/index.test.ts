@@ -48,6 +48,35 @@ function userEntry(id: string, text: string): SessionEntry {
 	} as SessionEntry;
 }
 
+function nativeCheckpoint(id: string, parentId: string | null, firstKeptEntryId = id): SessionEntry {
+	return {
+		type: "compaction",
+		id,
+		parentId,
+		timestamp: new Date().toISOString(),
+		summary: "local marker",
+		firstKeptEntryId,
+		tokensBefore: 100,
+		details: {
+			kind: NATIVE_COMPACTION_KIND,
+			version: NATIVE_COMPACTION_VERSION,
+			modelKey: "openai-codex:openai-codex-responses:gpt-test",
+			replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+		},
+	} as SessionEntry;
+}
+
+function contextEdit(id: string, parentId: string, targetId: string, replacement: unknown): SessionEntry {
+	return {
+		type: "context_edit",
+		id,
+		parentId,
+		timestamp: new Date().toISOString(),
+		targetId,
+		replacement,
+	} as SessionEntry;
+}
+
 function extensionHarness(initialBranch: SessionEntry[], hostVersion = "0.84.4") {
 	const handlers = new Map<string, (...args: any[]) => any>();
 	const entryRenderers = new Map<string, (...args: any[]) => any>();
@@ -527,6 +556,98 @@ describe("pi-codex-compaction", () => {
 });
 
 describe("native compaction helpers", () => {
+	test("applies omissions and replacements after a native checkpoint", () => {
+		const checkpoint = nativeCheckpoint("checkpoint", null);
+		const omitted = { ...userEntry("omitted", "omit this"), parentId: "checkpoint" } as SessionEntry;
+		const replaced = { ...userEntry("replaced", "original"), parentId: "omitted" } as SessionEntry;
+		const omit = contextEdit("omit-edit", "replaced", "omitted", null);
+		const replace = contextEdit("replace-edit", "omit-edit", "replaced", { content: "replacement" });
+
+		const input = effectiveInputForBranch({
+			branch: [checkpoint, omitted, replaced, omit, replace],
+			model,
+			tools: [],
+		});
+
+		expect(JSON.stringify(input)).not.toContain("omit this");
+		expect(JSON.stringify(input)).not.toContain("original");
+		expect(JSON.stringify(input)).toContain("replacement");
+	});
+
+	test("blocks edits to retained pre-checkpoint history but ignores compacted-away targets", () => {
+		const discarded = userEntry("discarded", "compacted away");
+		const retained = { ...userEntry("retained", "retained"), parentId: "discarded" } as SessionEntry;
+		const checkpoint = nativeCheckpoint("checkpoint", "retained", "retained");
+		const conflictingEdit = contextEdit("conflict", "checkpoint", "retained", { content: "changed" });
+
+		expect(() => effectiveInputForBranch({
+			branch: [discarded, retained, checkpoint, conflictingEdit],
+			model,
+			tools: [],
+		})).toThrow("context edit targets retained history");
+
+		const irrelevantEdit = contextEdit("irrelevant", "checkpoint", "discarded", { content: "ignored" });
+		const input = effectiveInputForBranch({
+			branch: [discarded, retained, checkpoint, irrelevantEdit],
+			model,
+			tools: [],
+		});
+		expect(JSON.stringify(input)).not.toContain("compacted away");
+		expect(JSON.stringify(input)).not.toContain("ignored");
+	});
+
+	test("leaves checkpoint input unchanged without context edits", () => {
+		const checkpoint = nativeCheckpoint("checkpoint", null);
+		const next = { ...userEntry("next", "continue"), parentId: "checkpoint" } as SessionEntry;
+
+		expect(effectiveInputForBranch({ branch: [checkpoint, next], model, tools: [] })).toEqual([
+			{ type: "compaction", encrypted_content: "opaque" },
+			{ role: "user", content: [{ type: "input_text", text: "continue" }] },
+		]);
+	});
+
+	test("uses the latest repeated context edit after a checkpoint", () => {
+		const checkpoint = nativeCheckpoint("checkpoint", null);
+		const target = { ...userEntry("target", "original"), parentId: "checkpoint" } as SessionEntry;
+		const first = contextEdit("first", "target", "target", { content: "first replacement" });
+		const omit = contextEdit("omit", "first", "target", null);
+		const final = contextEdit("final", "omit", "target", { content: "final replacement" });
+
+		const input = effectiveInputForBranch({ branch: [checkpoint, target, first, omit, final], model, tools: [] });
+		expect(JSON.stringify(input)).not.toContain("original");
+		expect(JSON.stringify(input)).not.toContain("first replacement");
+		expect(JSON.stringify(input)).toContain("final replacement");
+	});
+
+	test("preserves the recovery branch when excluding the last assistant", () => {
+		const user = userEntry("user", "retry this");
+		const failure = {
+			type: "message",
+			id: "failure",
+			parentId: "user",
+			timestamp: new Date().toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "context overflow" }],
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+				model: model.id,
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+		} as SessionEntry;
+		const omission = contextEdit("omission", "failure", "failure", null);
+
+		const input = effectiveInputForBranch({
+			branch: [user, failure, omission],
+			model,
+			tools: [],
+			excludeLastAssistantError: true,
+		});
+		expect(JSON.stringify(input)).toContain("retry this");
+		expect(JSON.stringify(input)).not.toContain("context overflow");
+	});
+
 	test("drops foreign reasoning state and response item ids", () => {
 		const user = userEntry("user-1", "review this change");
 		const assistant = {

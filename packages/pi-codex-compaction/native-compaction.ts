@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import {
+	buildContextEntries,
 	buildSessionContext,
 	convertToLlm,
-	sessionEntryToContextMessages,
 	type SessionEntry,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
@@ -297,8 +297,23 @@ function messagesToResponseItems(model: Model<any>, messages: Message[], tools: 
 }
 
 function entriesToResponseItems(model: Model<any>, entries: SessionEntry[], tools: ToolInfo[]): ResponseItem[] {
-	const messages = entries.flatMap((entry) => sessionEntryToContextMessages(entry));
+	const messages = buildSessionContext(entries).messages;
 	return messagesToResponseItems(model, convertToLlm(messages), tools);
+}
+
+function assertCheckpointNotInvalidated(branch: SessionEntry[], checkpoint: NativeCheckpoint): void {
+	const entryIndexById = new Map(branch.map((entry, index) => [entry.id, index]));
+	const retainedBeforeCheckpoint = new Set(
+		buildContextEntries(branch)
+			.filter((entry) => (entryIndexById.get(entry.id) ?? Number.POSITIVE_INFINITY) < checkpoint.entryIndex)
+			.map((entry) => entry.id),
+	);
+	const conflictingEdit = branch.slice(checkpoint.entryIndex + 1).find(
+		(entry) => entry.type === "context_edit" && retainedBeforeCheckpoint.has(entry.targetId),
+	);
+	if (conflictingEdit) {
+		throw new Error("A context edit targets retained history before the latest OpenAI Codex native checkpoint.");
+	}
 }
 
 export function effectiveInputForBranch(params: {
@@ -313,7 +328,12 @@ export function effectiveInputForBranch(params: {
 			(entry) => entry.type === "message" && entry.message.role === "assistant",
 		);
 		if (lastAssistantIndex >= 0) {
-			branch = branch.filter((_entry, index) => index !== lastAssistantIndex);
+			// Keep the node so later context edits can still traverse its parent chain.
+			branch = branch.map((entry, index) =>
+				index === lastAssistantIndex && entry.type === "message" && entry.message.role === "assistant"
+					? { ...entry, message: { ...entry.message, stopReason: "error" } }
+					: entry,
+			);
 		}
 	}
 
@@ -325,6 +345,7 @@ export function effectiveInputForBranch(params: {
 		if (checkpoint.checkpoint.details.modelKey !== modelKey(params.model)) {
 			throw new Error("The latest OpenAI Codex native compaction checkpoint belongs to a different model.");
 		}
+		assertCheckpointNotInvalidated(branch, checkpoint.checkpoint);
 		const tail = branch.slice(checkpoint.checkpoint.entryIndex + 1);
 		return [
 			...checkpoint.checkpoint.details.replacementHistory.map(cloneItem),

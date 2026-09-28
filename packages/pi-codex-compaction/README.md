@@ -35,7 +35,7 @@ Native compaction activates only for `openai-codex`. Other providers never recei
 
 Native checkpoints are persisted in `CompactionEntry.details`. Resume, forks, tree navigation, and repeated compaction derive state from the newest checkpoint on the active branch. The request advertises Codex's `remote_compaction_v2` feature on compaction and follow-up calls.
 
-Compaction is fail-closed. If a native request fails, Pi's compaction is cancelled and the previous history remains intact. The extension never silently falls back to Pi text summarization. If a persisted native checkpoint is malformed or belongs to another Codex model, the next request is aborted rather than sending Pi's local marker to OpenAI.
+Compaction is fail-closed. If a native request fails, Pi's compaction is cancelled and the previous history remains intact. The extension never silently falls back to Pi text summarization. If a persisted native checkpoint is malformed or belongs to another Codex model, the next request is aborted rather than sending Pi's local marker to OpenAI. A context edit after a native checkpoint that changes retained earlier history also blocks the request: the opaque checkpoint cannot be safely rewritten.
 
 ## Configuration
 
