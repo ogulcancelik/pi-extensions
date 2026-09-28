@@ -144,7 +144,8 @@ function getEmailPrefixFromJwt(token: string): string | null {
 // ============ Auth Loading ============
 
 function loadAuthJson(): Record<string, any> {
-  const authPath = join(homedir(), ".pi", "agent", "auth.json");
+  const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  const authPath = join(agentDir, "auth.json");
   try {
     if (existsSync(authPath)) {
       return JSON.parse(readFileSync(authPath, "utf-8"));

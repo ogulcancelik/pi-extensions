@@ -46,7 +46,7 @@ Accepted false values: `0`, `false`, `no`, `off` (case-insensitive).
 
 ## How it works
 
-The footer reads context usage from the last assistant message's token counts (free — comes with every LLM response). Subscription usage is fetched from each provider's dedicated quota API using your existing auth tokens from `~/.pi/agent/auth.json` or environment variables.
+The footer reads context usage from the last assistant message's token counts (free — comes with every LLM response). Subscription usage is fetched from each provider's dedicated quota API using your existing auth tokens from pi's `auth.json` or provider API-key environment variables (e.g. `ANTHROPIC_API_KEY`).
 
 Usage is fetched:
 
@@ -71,5 +71,5 @@ Anthropic's OAuth usage endpoint (`/api/oauth/usage`) rate-limits requests by `U
 ## Notes
 
 - Replaces the default pi footer entirely via `ctx.ui.setFooter()`
-- Auth tokens are read from `~/.pi/agent/auth.json` (populated by `/login`) or standard env vars (`ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`, etc.)
+- Auth tokens are read from pi's `auth.json` (populated by `/login`; defaults to `~/.pi/agent/`, or `$PI_CODING_AGENT_DIR` when set) or standard env vars (`ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`, etc.)
 - Providers without auth simply don't show a usage bar — no errors
