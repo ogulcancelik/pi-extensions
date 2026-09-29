@@ -117,15 +117,31 @@ const AgentKindEnum = StringEnum(
 	{ description: "Supported coding agent kind and canonical executable" },
 );
 
-function parseHerdrError(output: string): string | null {
+function parseHerdrErrorEnvelope(output: string): HerdrJsonEnvelope["error"] | null {
 	const trimmed = output.trim();
 	if (!trimmed) return null;
 	try {
 		const value = JSON.parse(trimmed) as HerdrJsonEnvelope;
-		return value.error?.message || value.error?.code || trimmed;
+		if (!value.error || typeof value.error !== "object") return null;
+		const code = typeof value.error.code === "string" ? value.error.code : undefined;
+		const message = typeof value.error.message === "string" ? value.error.message : undefined;
+		return code || message ? { code, message } : null;
 	} catch {
-		return trimmed;
+		return null;
 	}
+}
+
+function parseHerdrError(output: string): string | null {
+	const trimmed = output.trim();
+	if (!trimmed) return null;
+	const error = parseHerdrErrorEnvelope(trimmed);
+	return error?.message || error?.code || trimmed;
+}
+
+function formatTransportDiagnostic(output: string): string {
+	const trimmed = output.trim();
+	if (!trimmed) return "";
+	return truncateTail(trimmed, { maxLines: 20, maxBytes: 2048 }).content.trim();
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -286,6 +302,27 @@ export default function (pi: ExtensionAPI) {
 
 	async function execHerdrText(args: string[], signal?: AbortSignal): Promise<string> {
 		return (await execHerdr(args, signal)).stdout;
+	}
+
+	async function submitPaneCommand(paneId: string, command: string, signal?: AbortSignal): Promise<void> {
+		const result = await pi.exec("herdr", ["pane", "run", paneId, command], { signal });
+		if (!result.killed && result.code === 0) return;
+
+		const rejection = parseHerdrErrorEnvelope(result.stderr) || parseHerdrErrorEnvelope(result.stdout);
+		if (rejection) {
+			const code = rejection.code ? ` (${rejection.code})` : "";
+			const message = rejection.message || rejection.code || "Herdr rejected the request";
+			throw new Error(`Pane command submission failed${code}: ${message}`);
+		}
+
+		const reason = result.killed || signal?.aborted
+			? "the Herdr client was cancelled or killed before a conclusive acknowledgement"
+			: `the Herdr client exited with code ${result.code} without a structured Herdr error`;
+		const diagnostic = formatTransportDiagnostic(result.stderr || result.stdout);
+		throw new Error(
+			`Pane command submission outcome is ambiguous: ${reason}${diagnostic ? `; client output: ${diagnostic}` : ""}. `
+			+ "The command may have been accepted; do not retry automatically.",
+		);
 	}
 
 	async function getCurrentPane(signal?: AbortSignal): Promise<PaneInfo> {
@@ -504,10 +541,20 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "run": {
 					if (!params.command) throw new Error("'command' is required for run");
-					await execHerdrJson(["pane", "run", params.pane, params.command], signal);
+					await submitPaneCommand(params.pane, params.command, signal);
 					return {
-						content: [{ type: "text", text: `Submitted command to pane ${params.pane}` }],
-						details: { action: "run", pane: params.pane, command: params.command },
+						content: [{
+							type: "text",
+							text: `Submitted command to pane ${params.pane}; submission accepted, command exit status not observed.`,
+						}],
+						details: {
+							action: "run",
+							pane: params.pane,
+							command: params.command,
+							submissionStatus: "accepted",
+							commandStatus: "not_observed",
+							commandExitCode: null,
+						},
 					};
 				}
 				case "read": {
