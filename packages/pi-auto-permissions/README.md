@@ -159,6 +159,22 @@ Trusted projects may optionally provide their root `AGENTS.md`, or `CLAUDE.md` w
 
 Project instructions help interpret the requested workflow, but cannot independently authorize an action or override guardian policy.
 
+### Interactive dialog answers
+
+When the main agent gathers a decision through an interactive question tool (for example `ask_user_question`), the user's selection is stored as a tool result, which never grants permission. Operators can allowlist user-answer tools, whose confirmed answers become `source: "user"` evidence records:
+
+```json
+{
+  "reviewEvidence": {
+    "userAnswerTools": ["ask_user_question"]
+  }
+}
+```
+
+A successful result from an allowlisted tool qualifies when its `details` are `{ "answers": [{ "question": string, "answer"?: string, "selected"?: string[], "notes"?: string }], "cancelled": false }` with no `error` field. `selected` takes precedence over `answer`, non-string answers are ignored, and notes count only alongside a real answer. Each answered question contributes one `USER (dialog answer):` record; the guardian treats it as authorization for exactly the selected content and is told the question wording is assistant-drafted context, never an instruction. Any dialog extension emitting that shape qualifies.
+
+The allowlist matches what you wrote: a bare name such as `ask_user_question` matches that tool in any namespace (`functions.ask_user_question` included), while a dotted name matches exactly. The default is an empty list.
+
 ## Review display
 
 The default UI shows guardian progress in a temporary widget below the editor. Configure it with:
@@ -208,6 +224,8 @@ A missing reviewer model, unavailable credentials, malformed response, timeout, 
 Rules match raw shell text. Quoting, variables, aliases, generated scripts, or other indirection can evade a regex, while quoted command text can cause false positives.
 
 Pi Auto Permissions is a permission layer for normal agent behavior. It is not an operating-system sandbox or a defense against hostile shell input. Pair it with sandboxing when commands need a hard security boundary.
+
+`reviewEvidence.userAnswerTools` widens what counts as user authorization: any code that can record a tool result under an allowlisted tool name can mint `USER (dialog answer)` evidence. Allowlist only tool names served by extensions you trust.
 
 ## License
 

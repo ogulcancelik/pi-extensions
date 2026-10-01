@@ -132,6 +132,109 @@ describe("compact review evidence", () => {
     ]);
   });
 
+  test("promotes confirmed dialog answers from allowlisted tools to user evidence", () => {
+    const entries = [
+      { id: "u1", type: "message", message: { role: "user", content: "deploy the release to some demo hosts" } },
+      {
+        id: "a1",
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: "ask-1", name: "functions.ask_user_question", arguments: { questions: [] } },
+          ],
+        },
+      },
+      {
+        id: "r1",
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "ask-1",
+          toolName: "functions.ask_user_question",
+          isError: false,
+          content: [{ type: "text", text: "ENVELOPE_PROSE_CANARY" }],
+          details: {
+            answers: [
+              { questionIndex: 0, question: "Which hosts first?", kind: "option", answer: "southern, dominion" },
+              { questionIndex: 1, question: "Enable which checks?", kind: "multi", answer: "overridden", selected: ["lint", "tests"], notes: "skip e2e" },
+              { questionIndex: 2, question: "Unanswered?", kind: "option", answer: "   " },
+              { questionIndex: 3, question: "Notes only?", kind: "option", answer: "", notes: "a note is not an answer" },
+              { questionIndex: 4, question: "Non-string?", kind: "option", answer: true },
+            ],
+            cancelled: false,
+          },
+        },
+      },
+    ];
+
+    const records = collectReviewEvidence(entries, "pending-1", ["ask_user_question"]);
+    expect(records.map((record) => ({ source: record.source, text: record.text }))).toEqual([
+      { source: "user", text: "USER: deploy the release to some demo hosts" },
+      { source: "tool", text: "TOOL functions.ask_user_question → success" },
+      { source: "user", text: 'USER (dialog answer): selected "southern, dominion" — assistant-drafted question: "Which hosts first?"' },
+      { source: "user", text: 'USER (dialog answer): selected "lint; tests (note: skip e2e)" — assistant-drafted question: "Enable which checks?"' },
+    ]);
+    expect(records[2].key).not.toBe(records[3].key);
+    expect(JSON.stringify(records)).not.toContain("ENVELOPE_PROSE_CANARY");
+    expect(AUTO_PERMISSIONS_SYSTEM_PROMPT).toContain('USER (dialog answer):');
+  });
+
+  test("ignores dialog answers that are not allowlisted, cancelled, errored, or malformed", () => {
+    const answers = [{ questionIndex: 0, question: "Which hosts first?", kind: "option", answer: "southern" }];
+    const resultEntry = (details: unknown, isError: unknown = false, toolName = "ask_user_question") => [
+      {
+        id: "a1",
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "ask-1", name: toolName, arguments: {} }],
+        },
+      },
+      {
+        id: "r1",
+        type: "message",
+        message: { role: "toolResult", toolCallId: "ask-1", toolName, isError, content: [], details },
+      },
+    ];
+
+    const userRecords = (entries: unknown[], tools?: readonly string[]) =>
+      collectReviewEvidence(entries, undefined, tools).filter((record) => record.source === "user");
+
+    expect(userRecords(resultEntry({ answers, cancelled: false }))).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: false }), ["other_tool"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: true }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: false, error: "no_ui" }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: false }, true), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers: [], cancelled: false }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry("prose only"), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: "true" }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: 1 }), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: false }, "false"), ["ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry({ answers, cancelled: false }), ["ask_user_question"]).length).toBe(1);
+    expect(userRecords(resultEntry({ answers, cancelled: false }, undefined), ["ask_user_question"]).length).toBe(1);
+  });
+
+  test("matches bare allowlist names across namespaces but keeps dotted names exact", () => {
+    const answers = [{ questionIndex: 0, question: "Which hosts first?", kind: "option", answer: "southern" }];
+    const resultEntry = (toolName: string) => [
+      {
+        id: "r1",
+        type: "message",
+        message: { role: "toolResult", toolCallId: "ask-1", toolName, isError: false, content: [], details: { answers, cancelled: false } },
+      },
+    ];
+
+    const userRecords = (entries: unknown[], tools: readonly string[]) =>
+      collectReviewEvidence(entries, undefined, tools).filter((record) => record.source === "user");
+
+    expect(userRecords(resultEntry("functions.ask_user_question"), ["ask_user_question"]).length).toBe(1);
+    expect(userRecords(resultEntry("functions.ask_user_question"), ["functions.ask_user_question"]).length).toBe(1);
+    expect(userRecords(resultEntry("evilext.ask_user_question"), ["trusted.ask_user_question"])).toEqual([]);
+    expect(userRecords(resultEntry("ask_user_question"), ["trusted.ask_user_question"])).toEqual([]);
+  });
+
   test("builds explicit cumulative full and delta envelopes around the exact latest action", () => {
     const request = {
       tool: "functions.bash",
