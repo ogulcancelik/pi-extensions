@@ -224,7 +224,11 @@ function getCodexToken(): { token: string; accountId?: string } | undefined {
     return { token: auth["openai-codex"].access, accountId: auth["openai-codex"]?.accountId };
   }
 
-  // Fallback: ~/.codex/auth.json
+  // Pi 1.0.0 removed the openai-codex provider: ChatGPT OAuth models are served
+  // as provider "openai", and pi stores the OAuth token under auth["openai"].
+  // That token talks directly to api.openai.com and is rejected by the
+  // chatgpt.com usage endpoint, so prefer a codex CLI login (same account,
+  // classic backend token) for the usage fetch.
   const codexPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
   try {
     if (existsSync(codexPath)) {
@@ -237,6 +241,10 @@ function getCodexToken(): { token: string; accountId?: string } | undefined {
       }
     }
   } catch {}
+
+  if (auth["openai"]?.access) {
+    return { token: auth["openai"].access };
+  }
 
   return undefined;
 }
@@ -769,7 +777,11 @@ async function fetchOpencodeGoUsage(): Promise<UsageSnapshot> {
 // Map pi provider names to our internal usage provider keys
 const PROVIDER_MAP: Record<string, string> = {
   anthropic: "claude", // Claude Max subscription
-  "openai-codex": "codex", // Codex subscription
+  "openai-codex": "codex", // Codex subscription (pi < 1.0.0)
+  openai: "codex", // Pi 1.0.0: ChatGPT OAuth models are served as provider "openai".
+  // The usage fetch only resolves tokens that can access the ChatGPT usage
+  // endpoint (codex CLI login or legacy OAuth), so plain API-key setups show
+  // no usage bar either way.
   "github-copilot": "copilot", // Copilot subscription
   "google-gemini-cli": "gemini", // Gemini CLI subscription
   minimax: "minimax", // MiniMax Token Plan / Coding Plan
