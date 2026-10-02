@@ -4,7 +4,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { loadLegacyConfig } from "./config.ts";
 import {
-	buildCodexHeaders,
+	buildCompactionHeaders,
 	buildCompactionRequestBody,
 	buildReplacementHistory,
 	buildToolPayload,
@@ -13,11 +13,12 @@ import {
 	findNativeCheckpoint,
 	isJsonObject,
 	isOpenAICodexModel,
+	isOpenAICompactableModel,
 	mergeFeatureHeader,
 	modelKey,
 	NATIVE_COMPACTION_KIND,
 	NATIVE_COMPACTION_VERSION,
-	resolveCodexResponsesUrl,
+	resolveCompactionUrl,
 	stripInputFromPayload,
 	type JsonObject,
 	type NativeCompactionDetails,
@@ -66,10 +67,6 @@ function localMarker(): string {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-function effectiveBaseUrl(model: Model<any>): string | undefined {
-	return model.baseUrl;
 }
 
 function setFeatureHeader(headers: Record<string, string | null>): void {
@@ -139,8 +136,8 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 			sessionId,
 		});
 		const remote = await callRemoteCompaction({
-			url: resolveCodexResponsesUrl(effectiveBaseUrl(params.model)),
-			headers: buildCodexHeaders({ apiKey: auth.apiKey, headers: auth.headers, sessionId }),
+			url: resolveCompactionUrl(params.model),
+			headers: buildCompactionHeaders({ model: params.model, apiKey: auth.apiKey, headers: auth.headers as Record<string, string>, sessionId }),
 			body,
 			model: params.model,
 			signal: params.signal,
@@ -178,13 +175,16 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 	});
 
 	pi.on("before_provider_headers", (event, ctx) => {
+		// The Codex beta feature header is only meaningful for the chatgpt.com
+		// Codex backend; direct-token api.openai.com models must not carry it on
+		// regular traffic (pi core sends none for them either).
 		if (!isOpenAICodexModel(ctx.model)) return;
 		setFeatureHeader(event.headers);
 	});
 
 	pi.on("before_provider_request", async (event, ctx) => {
 		const model = ctx.model;
-		if (!isOpenAICodexModel(model) || !isJsonObject(event.payload)) return undefined;
+		if (!model || !isOpenAICompactableModel(model) || !isJsonObject(event.payload)) return undefined;
 
 		const sessionId = ctx.sessionManager.getSessionId();
 		const legacyState = legacyCompaction;
@@ -225,7 +225,7 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		const model = ctx.model;
-		if (!isOpenAICodexModel(model)) return undefined;
+		if (!model || !isOpenAICompactableModel(model)) return undefined;
 
 		try {
 			const sessionId = ctx.sessionManager.getSessionId();
@@ -275,7 +275,7 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 	};
 
 	pi.on("turn_end", (_event, ctx) => {
-		if (legacyCompaction || !isOpenAICodexModel(ctx.model)) return;
+		if (legacyCompaction || !isOpenAICompactableModel(ctx.model)) return;
 		const config = loadLegacyConfig(ctx.cwd, ctx.isProjectTrusted());
 		if (!config.autoCompact) return;
 
@@ -299,7 +299,7 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 			|| state.sessionId !== ctx.sessionManager.getSessionId()
 			|| event.reason === "manual"
 			|| !event.fromExtension
-			|| !isOpenAICodexModel(ctx.model)
+			|| !isOpenAICompactableModel(ctx.model)
 			|| !isJsonObject(details)
 			|| details.kind !== NATIVE_COMPACTION_KIND
 		) {
@@ -317,7 +317,7 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 		if (
 			!state
 			|| state.sessionId !== ctx.sessionManager.getSessionId()
-			|| !isOpenAICodexModel(ctx.model)
+			|| !isOpenAICompactableModel(ctx.model)
 		) {
 			return;
 		}

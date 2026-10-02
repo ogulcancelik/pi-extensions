@@ -12,6 +12,11 @@ export const NATIVE_COMPACTION_KIND = "openai-codex-native-compaction";
 export const NATIVE_COMPACTION_VERSION = 1;
 export const REMOTE_COMPACTION_FEATURE = "remote_compaction_v2";
 export const RETAINED_USER_TOKEN_BUDGET = 64_000;
+/**
+ * Threshold (tokens) for direct-token compaction requests. Low enough that the
+ * server compacts the entire provided input into a single compaction item.
+ */
+export const COMPACTION_TRIGGER_THRESHOLD_TOKENS = 1024;
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const MAX_REMOTE_RETRIES = 2;
@@ -49,6 +54,28 @@ export function isJsonObject(value: unknown): value is JsonObject {
 export function isOpenAICodexModel(model: unknown): model is Model<"openai-codex-responses"> {
 	if (!isJsonObject(model)) return false;
 	return model.provider === "openai-codex" && model.api === "openai-codex-responses";
+}
+
+/**
+ * Pi 1.0.0 removed the separate `openai-codex` provider: ChatGPT OAuth models are
+ * served as `openai` / `openai-responses` with the OAuth access token sent
+ * directly to api.openai.com (scope `chatgpt.tokens.use.direct`). Those models
+ * support native compaction via `context_management` on the regular Responses
+ * endpoint instead of `compaction_trigger` on the Codex backend.
+ */
+export function isDirectOpenAIResponsesModel(model: unknown): boolean {
+	if (!isJsonObject(model)) return false;
+	if (model.provider !== "openai" || model.api !== "openai-responses") return false;
+	const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : "";
+	try {
+		return new URL(baseUrl).hostname === "api.openai.com";
+	} catch {
+		return false;
+	}
+}
+
+export function isOpenAICompactableModel(model: unknown): boolean {
+	return isOpenAICodexModel(model) || isDirectOpenAIResponsesModel(model);
 }
 
 export function modelKey(model: Pick<Model<any>, "provider" | "api" | "id">): string {
@@ -444,7 +471,6 @@ export function buildCompactionRequestBody(params: {
 		store: false,
 		stream: true,
 		instructions: params.instructions,
-		input: [...params.input.map(cloneItem), { type: "compaction_trigger" }],
 		tool_choice: "auto",
 		parallel_tool_calls: true,
 		include,
@@ -453,6 +479,20 @@ export function buildCompactionRequestBody(params: {
 			? { verbosity: previousText.verbosity }
 			: { verbosity: "low" },
 	};
+	if (isOpenAICodexModel(params.model)) {
+		// Codex backend: the dedicated trigger item asks for a compaction.
+		body.input = [...params.input.map(cloneItem), { type: "compaction_trigger" }];
+	} else {
+		// Regular Responses endpoint: `compaction_trigger` is rejected for direct
+		// ChatGPT tokens ("Remove unsupported input items or use an API key
+		// instead"). `context_management` performs the same server-side
+		// compaction; the low threshold forces the entire input into one
+		// compaction item returned via response.output_item.done.
+		body.input = params.input.map(cloneItem);
+		body.context_management = [
+			{ type: "compaction", compact_threshold: COMPACTION_TRIGGER_THRESHOLD_TOKENS },
+		];
+	}
 	if (params.tools) body.tools = params.tools;
 	else delete body.tools;
 	delete body.messages;
@@ -465,6 +505,16 @@ export function resolveCodexResponsesUrl(baseUrl?: string): string {
 	if (normalized.endsWith("/codex/responses")) return normalized;
 	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
 	return `${normalized}/codex/responses`;
+}
+
+/**
+ * Compaction endpoint for a given model: Codex-backend models use the Codex
+ * responses URL; direct-token `openai` models use the regular Responses URL.
+ */
+export function resolveCompactionUrl(model: Model<any>): string {
+	if (isOpenAICodexModel(model)) return resolveCodexResponsesUrl(model.baseUrl);
+	const normalized = (model.baseUrl?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
+	return normalized.endsWith("/responses") ? normalized : `${normalized}/responses`;
 }
 
 export function extractCodexAccountId(token: string): string {
@@ -504,6 +554,36 @@ export function buildCodexHeaders(params: {
 	headers.set("session-id", params.sessionId);
 	headers.set("x-client-request-id", params.sessionId);
 	headers.set("x-codex-beta-features", mergeFeatureHeader(headers.get("x-codex-beta-features")));
+	return headers;
+}
+
+/**
+ * Compaction request headers, dispatched by model:
+ * - Codex-backend models: same as buildCodexHeaders (chatgpt-account-id, Codex beta
+ *   headers).
+ * - Direct-token `openai` models: no account-id (the token carries none) and no
+ *   Codex-specific beta headers — pi core sends none for these models either, and
+ *   the request goes to the regular Responses endpoint.
+ */
+export function buildCompactionHeaders(params: {
+	model: Model<any>;
+	apiKey: string;
+	headers?: Record<string, string>;
+	sessionId: string;
+}): Headers {
+	const headers = new Headers(params.headers);
+	headers.set("authorization", `Bearer ${params.apiKey}`);
+	if (isOpenAICodexModel(params.model)) {
+		headers.set("chatgpt-account-id", extractCodexAccountId(params.apiKey));
+		headers.set("OpenAI-Beta", "responses=experimental");
+		headers.set("x-codex-beta-features", mergeFeatureHeader(headers.get("x-codex-beta-features")));
+	}
+	headers.set("originator", "pi");
+	headers.set("user-agent", "pi-codex-compaction");
+	headers.set("accept", "text/event-stream");
+	headers.set("content-type", "application/json");
+	headers.set("session-id", params.sessionId);
+	headers.set("x-client-request-id", params.sessionId);
 	return headers;
 }
 

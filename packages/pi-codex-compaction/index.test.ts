@@ -2,7 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { needsLegacyCompactionFallback, registerCodexCompactionExtension } from "./index.ts";
 import {
+	buildCompactionHeaders,
+	buildCompactionRequestBody,
 	buildReplacementHistory,
+	COMPACTION_TRIGGER_THRESHOLD_TOKENS,
+	isOpenAICompactableModel,
+	resolveCompactionUrl,
 	effectiveInputForBranch,
 	findNativeCheckpoint,
 	mergeFeatureHeader,
@@ -728,6 +733,7 @@ describe("native compaction helpers", () => {
 				model: model.id,
 				stopReason: "aborted",
 				timestamp: Date.now(),
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 			},
 		} as SessionEntry;
 		const user = { ...userEntry("user-after-abort", "what happened?"), parentId: "assistant-aborted" } as SessionEntry;
@@ -868,5 +874,74 @@ describe("native compaction helpers", () => {
 
 	test("merges the beta feature without removing existing features", () => {
 		expect(mergeFeatureHeader("foo, remote_compaction_v2")).toBe("foo,remote_compaction_v2");
+	});
+});
+
+describe("direct-token openai models (pi 1.0.0)", () => {
+	const directModel = {
+		id: "gpt-6.1-sol",
+		name: "GPT 6.1 Sol",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		reasoning: true,
+		input: ["text"],
+		contextWindow: 272_000,
+		maxTokens: 128_000,
+		cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0, total: 0 },
+	} as any;
+
+	test("activates compaction for openai/openai-responses models", () => {
+		expect(isOpenAICompactableModel(directModel)).toBe(true);
+		expect(isOpenAICompactableModel(model)).toBe(true);
+		expect(isOpenAICompactableModel({ provider: "openai", api: "openai-responses", baseUrl: "https://portal.example.com/v1" })).toBe(false);
+	});
+
+	test("uses the regular Responses endpoint and no account-id header", async () => {
+		expect(resolveCompactionUrl(directModel)).toBe("https://api.openai.com/v1/responses");
+		const headers = buildCompactionHeaders({ model: directModel, apiKey: token(), sessionId: "s1" });
+		expect(headers.get("chatgpt-account-id")).toBeNull();
+		expect(headers.get("authorization")).toContain("Bearer ");
+		expect(headers.get("x-codex-beta-features")).toBeNull();
+
+		const codexHeaders = buildCompactionHeaders({ model, apiKey: token(), sessionId: "s1" });
+		expect(codexHeaders.get("chatgpt-account-id")).toBe("account-123");
+		expect(codexHeaders.get("x-codex-beta-features")).toBe("remote_compaction_v2");
+	});
+
+	test("does not inject the codex feature header into regular requests for direct models", () => {
+		const harness = extensionHarness([]);
+
+		const directHeaders: Record<string, string | null> = {};
+		(harness.context as any).model = directModel;
+		harness.handlers.get("before_provider_headers")!({ headers: directHeaders }, harness.context);
+		expect(directHeaders["x-codex-beta-features"]).toBeUndefined();
+
+		const codexHeaders: Record<string, string | null> = {};
+		(harness.context as any).model = model;
+		harness.handlers.get("before_provider_headers")!({ headers: codexHeaders }, harness.context);
+		expect(codexHeaders["x-codex-beta-features"]).toBe("remote_compaction_v2");
+	});
+
+	test("compaction request uses context_management instead of compaction_trigger", () => {
+		const body = buildCompactionRequestBody({
+			model: directModel,
+			input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+			instructions: "sys",
+			sessionId: "s1",
+		});
+		expect(body.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hi" }] }]);
+		expect(body.context_management).toEqual([
+			{ type: "compaction", compact_threshold: COMPACTION_TRIGGER_THRESHOLD_TOKENS },
+		]);
+
+		const codexBody = buildCompactionRequestBody({
+			model,
+			input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+			instructions: "sys",
+			sessionId: "s1",
+		});
+		expect((codexBody.input as JsonObject[]).at(-1)).toEqual({ type: "compaction_trigger" });
+		expect(codexBody.context_management).toBeUndefined();
 	});
 });
