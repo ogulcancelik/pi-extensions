@@ -10,7 +10,7 @@ Minimal footer for [pi](https://github.com/earendil-works/pi) that replaces the 
 
 - **Context gauge** — optional working directory and git branch, model, thinking level, and context window usage with token counts
 - **Subscription usage bars** — rolling window quotas with reset timers for supported providers
-- **Auto-refresh** — fetches usage on startup and model switch, then every 5 minutes
+- **Shared usage cache** — all pi instances share one cached result per provider and account, so opening more sessions doesn't mean more quota API calls
 - **Git integration** — branch name, dirty state, ahead/behind counts
 
 ## Supported providers
@@ -48,11 +48,7 @@ Accepted false values: `0`, `false`, `no`, `off` (case-insensitive).
 
 The footer reads context usage from the last assistant message's token counts (free — comes with every LLM response). Subscription usage is fetched from each provider's dedicated quota API using your existing auth tokens from `~/.pi/agent/auth.json` or environment variables.
 
-Usage is fetched:
-
-- Once on startup
-- Immediately on model switch (Ctrl+P)
-- Every 5 minutes after that
+Usage is cached in `~/.pi/agent/pi-minimal-footer/` and shared by every pi instance. Each instance re-reads the cache on startup, on model switch (Ctrl+P), and every 30 seconds. Only one instance fetches when the cache is older than 5 minutes. Failed fetches keep the last good numbers and retry after a minute, or after the provider's `retry-after` when rate-limited.
 
 Git state is refreshed:
 

@@ -11,7 +11,17 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -20,13 +30,14 @@ import { homedir } from "node:os";
 interface RateWindow {
   label: string;
   usedPercent: number;
-  resetsIn?: string; // human readable "2h38m"
+  resetsAt?: number; // epoch ms; formatted at render time so the countdown stays live
 }
 
 interface UsageSnapshot {
   provider: string;
   windows: RateWindow[];
   error?: string;
+  retryAfterMs?: number;
   fetchedAt: number;
 }
 
@@ -39,8 +50,15 @@ interface GitCache {
 
 // ============ Usage Cache ============
 
-const USAGE_REFRESH_INTERVAL = 5 * 60_000; // 5 minutes
-const usageCache = new Map<string, UsageSnapshot>(); // keyed by provider
+// Usage is cached on disk and shared by every pi instance, so N open panes
+// cost one request per TTL instead of N.
+const USAGE_TTL = 5 * 60_000;
+const USAGE_CHECK_INTERVAL = 30_000;
+const USAGE_ERROR_RETRY = 60_000;
+const USAGE_MAX_STALE = 60 * 60_000;
+const USAGE_CLAIM = 30_000; // other instances hold off this long while one fetches
+const USAGE_FILE_MAX_AGE = 24 * 60 * 60_000;
+const USAGE_CACHE_DIR = join(homedir(), ".pi", "agent", "pi-minimal-footer");
 
 // ============ Env Flags ============
 
@@ -295,13 +313,6 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
-/** Normalize a value that might be 0-1 fraction OR 0-100 percent, then clamp. */
-function normalizePercent(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  const normalized = value <= 1 && value >= 0 ? value * 100 : value;
-  return Math.max(0, Math.min(100, normalized));
-}
-
 function getWindowLabel(durationMs: number | undefined, fallback: string): string {
   if (!durationMs || !Number.isFinite(durationMs) || durationMs <= 0) return fallback;
 
@@ -341,6 +352,33 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 5000
   }
 }
 
+function toTimestamp(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const ms = new Date(value as any).getTime();
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+function parseRetryAfter(res: Response): number | undefined {
+  const header = res.headers.get("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+    const date = Date.parse(header);
+    if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  }
+  return res.status === 429 ? USAGE_TTL : undefined;
+}
+
+function httpError(provider: string, res: Response): UsageSnapshot {
+  return {
+    provider,
+    windows: [],
+    error: `HTTP ${res.status}`,
+    retryAfterMs: parseRetryAfter(res),
+    fetchedAt: Date.now(),
+  };
+}
+
 // ============ Usage Fetchers ============
 
 async function fetchClaudeUsage(): Promise<UsageSnapshot> {
@@ -360,7 +398,7 @@ async function fetchClaudeUsage(): Promise<UsageSnapshot> {
     });
 
     if (!res.ok) {
-      return { provider: "Claude", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+      return httpError("Claude", res);
     }
 
     const data = (await res.json()) as any;
@@ -369,16 +407,16 @@ async function fetchClaudeUsage(): Promise<UsageSnapshot> {
     if (data.five_hour?.utilization !== undefined) {
       windows.push({
         label: "5h",
-        usedPercent: normalizePercent(data.five_hour.utilization),
-        resetsIn: data.five_hour.resets_at ? formatResetTime(new Date(data.five_hour.resets_at)) : undefined,
+        usedPercent: clampPercent(data.five_hour.utilization),
+        resetsAt: toTimestamp(data.five_hour.resets_at),
       });
     }
 
     if (data.seven_day?.utilization !== undefined) {
       windows.push({
         label: "Week",
-        usedPercent: normalizePercent(data.seven_day.utilization),
-        resetsIn: data.seven_day.resets_at ? formatResetTime(new Date(data.seven_day.resets_at)) : undefined,
+        usedPercent: clampPercent(data.seven_day.utilization),
+        resetsAt: toTimestamp(data.seven_day.resets_at),
       });
     }
 
@@ -406,19 +444,18 @@ async function fetchCopilotUsage(): Promise<UsageSnapshot> {
     });
 
     if (!res.ok) {
-      return { provider: "Copilot", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+      return httpError("Copilot", res);
     }
 
     const data = (await res.json()) as any;
     const windows: RateWindow[] = [];
 
-    const resetDate = data.quota_reset_date_utc ? new Date(data.quota_reset_date_utc) : undefined;
-    const resetsIn = resetDate ? formatResetTime(resetDate) : undefined;
+    const resetsAt = toTimestamp(data.quota_reset_date_utc);
 
     if (data.quota_snapshots?.premium_interactions) {
       const pi = data.quota_snapshots.premium_interactions;
       const usedPercent = clampPercent(100 - (pi.percent_remaining || 0));
-      windows.push({ label: "Premium", usedPercent, resetsIn });
+      windows.push({ label: "Premium", usedPercent, resetsAt });
     }
 
     if (data.quota_snapshots?.chat && !data.quota_snapshots.chat.unlimited) {
@@ -426,7 +463,7 @@ async function fetchCopilotUsage(): Promise<UsageSnapshot> {
       windows.push({
         label: "Chat",
         usedPercent: clampPercent(100 - (chat.percent_remaining || 0)),
-        resetsIn,
+        resetsAt,
       });
     }
 
@@ -461,7 +498,7 @@ async function fetchCodexUsage(): Promise<UsageSnapshot> {
     });
 
     if (!res.ok) {
-      return { provider: providerLabel, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+      return httpError(providerLabel, res);
     }
 
     const data = (await res.json()) as any;
@@ -469,23 +506,21 @@ async function fetchCodexUsage(): Promise<UsageSnapshot> {
 
     if (data.rate_limit?.primary_window) {
       const pw = data.rate_limit.primary_window;
-      const resetDate = pw.reset_at ? new Date(pw.reset_at * 1000) : undefined;
       const durationMs = typeof pw.limit_window_seconds === "number" ? pw.limit_window_seconds * 1000 : undefined;
       windows.push({
         label: getWindowLabel(durationMs, "5h"),
         usedPercent: clampPercent(pw.used_percent || 0),
-        resetsIn: resetDate ? formatResetTime(resetDate) : undefined,
+        resetsAt: pw.reset_at ? pw.reset_at * 1000 : undefined,
       });
     }
 
     if (data.rate_limit?.secondary_window) {
       const sw = data.rate_limit.secondary_window;
-      const resetDate = sw.reset_at ? new Date(sw.reset_at * 1000) : undefined;
       const durationMs = typeof sw.limit_window_seconds === "number" ? sw.limit_window_seconds * 1000 : undefined;
       windows.push({
         label: getWindowLabel(durationMs, "Week"),
         usedPercent: clampPercent(sw.used_percent || 0),
-        resetsIn: resetDate ? formatResetTime(resetDate) : undefined,
+        resetsAt: sw.reset_at ? sw.reset_at * 1000 : undefined,
       });
     }
 
@@ -509,7 +544,7 @@ async function fetchGeminiUsage(): Promise<UsageSnapshot> {
     });
 
     if (!res.ok) {
-      return { provider: "Gemini", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+      return httpError("Gemini", res);
     }
 
     const data = (await res.json()) as any;
@@ -571,7 +606,7 @@ async function fetchMinimaxUsage(provider: "minimax" | "minimax-cn"): Promise<Us
     });
 
     if (!res.ok) {
-      return { provider: providerLabel, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+      return httpError(providerLabel, res);
     }
 
     const data = (await res.json()) as any;
@@ -610,7 +645,6 @@ async function fetchMinimaxUsage(provider: "minimax" | "minimax-cn"): Promise<Us
     const intervalRemaining = Number(textBucket.current_interval_remaining_percent);
     if (Number.isFinite(intervalRemaining)) {
       const usedPercent = clampPercent(100 - intervalRemaining);
-      const resetDate = textBucket.end_time ? new Date(Number(textBucket.end_time)) : undefined;
       const durationMs =
         textBucket.start_time && textBucket.end_time
           ? Number(textBucket.end_time) - Number(textBucket.start_time)
@@ -618,16 +652,13 @@ async function fetchMinimaxUsage(provider: "minimax" | "minimax-cn"): Promise<Us
       windows.push({
         label: getWindowLabel(durationMs, "5h"),
         usedPercent,
-        resetsIn: resetDate ? formatResetTime(resetDate) : undefined,
+        resetsAt: textBucket.end_time ? Number(textBucket.end_time) : undefined,
       });
     }
 
     const weeklyRemaining = Number(textBucket.current_weekly_remaining_percent);
     if (Number.isFinite(weeklyRemaining)) {
       const usedPercent = clampPercent(100 - weeklyRemaining);
-      const resetDate = textBucket.weekly_end_time
-        ? new Date(Number(textBucket.weekly_end_time))
-        : undefined;
       const durationMs =
         textBucket.weekly_start_time && textBucket.weekly_end_time
           ? Number(textBucket.weekly_end_time) - Number(textBucket.weekly_start_time)
@@ -635,7 +666,7 @@ async function fetchMinimaxUsage(provider: "minimax" | "minimax-cn"): Promise<Us
       windows.push({
         label: getWindowLabel(durationMs, "Week"),
         usedPercent,
-        resetsIn: resetDate ? formatResetTime(resetDate) : undefined,
+        resetsAt: textBucket.weekly_end_time ? Number(textBucket.weekly_end_time) : undefined,
       });
     }
 
@@ -666,7 +697,7 @@ async function fetchKimiUsage(): Promise<UsageSnapshot> {
     });
 
     if (!res.ok) {
-      return { provider: "Kimi Coding", windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+      return httpError("Kimi Coding", res);
     }
 
     const data = (await res.json()) as any;
@@ -678,7 +709,6 @@ async function fetchKimiUsage(): Promise<UsageSnapshot> {
       if (windowLimit > 0) {
         const used = windowLimit - windowRemaining;
         const usedPercent = clampPercent((used / windowLimit) * 100);
-        const resetDate = limit.detail?.resetTime ? new Date(limit.detail.resetTime) : undefined;
         const durationMs =
           limit.window?.duration && limit.window?.timeUnit === "TIME_UNIT_MINUTE"
             ? limit.window.duration * 60 * 1000
@@ -687,7 +717,7 @@ async function fetchKimiUsage(): Promise<UsageSnapshot> {
         windows.push({
           label: getWindowLabel(durationMs, "5h"),
           usedPercent,
-          resetsIn: resetDate ? formatResetTime(resetDate) : undefined,
+          resetsAt: toTimestamp(limit.detail?.resetTime),
         });
       }
     }
@@ -702,7 +732,7 @@ async function fetchKimiUsage(): Promise<UsageSnapshot> {
       windows.push({
         label: "Weekly",
         usedPercent,
-        resetsIn: weeklyResetTime ? formatResetTime(new Date(weeklyResetTime)) : undefined,
+        resetsAt: toTimestamp(weeklyResetTime),
       });
     }
 
@@ -728,7 +758,7 @@ async function fetchOpencodeGoUsage(): Promise<UsageSnapshot> {
     });
 
     if (!res.ok) {
-      return { provider: providerLabel, windows: [], error: `HTTP ${res.status}`, fetchedAt: Date.now() };
+      return httpError(providerLabel, res);
     }
 
     const data = (await res.json()) as any;
@@ -736,26 +766,26 @@ async function fetchOpencodeGoUsage(): Promise<UsageSnapshot> {
 
     if (data.rollingUsage) {
       const usedPercent = clampPercent(data.rollingUsage.usagePercent ?? 0);
-      const resetsIn = Number.isFinite(data.rollingUsage.resetInSec)
-        ? formatResetTime(new Date(Date.now() + data.rollingUsage.resetInSec * 1000))
+      const resetsAt = Number.isFinite(data.rollingUsage.resetInSec)
+        ? Date.now() + data.rollingUsage.resetInSec * 1000
         : undefined;
-      windows.push({ label: "5h", usedPercent, resetsIn });
+      windows.push({ label: "5h", usedPercent, resetsAt });
     }
 
     if (data.weeklyUsage) {
       const usedPercent = clampPercent(data.weeklyUsage.usagePercent ?? 0);
-      const resetsIn = Number.isFinite(data.weeklyUsage.resetInSec)
-        ? formatResetTime(new Date(Date.now() + data.weeklyUsage.resetInSec * 1000))
+      const resetsAt = Number.isFinite(data.weeklyUsage.resetInSec)
+        ? Date.now() + data.weeklyUsage.resetInSec * 1000
         : undefined;
-      windows.push({ label: "Week", usedPercent, resetsIn });
+      windows.push({ label: "Week", usedPercent, resetsAt });
     }
 
     if (data.monthlyUsage) {
       const usedPercent = clampPercent(data.monthlyUsage.usagePercent ?? 0);
-      const resetsIn = Number.isFinite(data.monthlyUsage.resetInSec)
-        ? formatResetTime(new Date(Date.now() + data.monthlyUsage.resetInSec * 1000))
+      const resetsAt = Number.isFinite(data.monthlyUsage.resetInSec)
+        ? Date.now() + data.monthlyUsage.resetInSec * 1000
         : undefined;
-      windows.push({ label: "Month", usedPercent, resetsIn });
+      windows.push({ label: "Month", usedPercent, resetsAt });
     }
 
     return { provider: providerLabel, windows, fetchedAt: Date.now() };
@@ -780,6 +810,73 @@ const PROVIDER_MAP: Record<string, string> = {
 
 function detectProvider(modelProvider: string): string | null {
   return PROVIDER_MAP[modelProvider] || null;
+}
+
+function getCredential(provider: string): string | undefined {
+  switch (provider) {
+    case "claude":
+      return getClaudeToken();
+    case "codex": {
+      const creds = getCodexToken();
+      return creds ? `${creds.accountId ?? ""}:${creds.token}` : undefined;
+    }
+    case "copilot":
+      return getCopilotToken();
+    case "gemini":
+      return getGeminiToken();
+    case "minimax":
+    case "minimax-cn":
+      return getMinimaxToken(provider);
+    case "kimi-coding":
+      return getKimiToken();
+    case "opencode-go":
+      return getOpencodeToken();
+    default:
+      return undefined;
+  }
+}
+
+// ============ Shared Usage Cache ============
+
+interface SharedUsage {
+  snapshot?: UsageSnapshot; // last successful result; failures never overwrite it
+  nextFetchAt: number;
+}
+
+/** One file per provider + account, so different logins never share numbers. */
+function sharedUsagePath(provider: string, credential: string): string {
+  const account = createHash("sha256").update(credential).digest("hex").slice(0, 16);
+  return join(USAGE_CACHE_DIR, `${provider}-${account}.json`);
+}
+
+function readSharedUsage(path: string): SharedUsage | null {
+  try {
+    return JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeSharedUsage(path: string, data: SharedUsage): void {
+  try {
+    mkdirSync(USAGE_CACHE_DIR, { recursive: true });
+    // Write-then-rename so readers never see a half-written file.
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data));
+    renameSync(tmp, path);
+    pruneSharedUsage();
+  } catch {}
+}
+
+/** Token rotation creates a new file per account; drop ones nobody touched in a day. */
+function pruneSharedUsage(): void {
+  try {
+    const now = Date.now();
+    for (const name of readdirSync(USAGE_CACHE_DIR)) {
+      const file = join(USAGE_CACHE_DIR, name);
+      if (now - statSync(file).mtimeMs > USAGE_FILE_MAX_AGE) unlinkSync(file);
+    }
+  } catch {}
 }
 
 async function fetchUsageForProvider(provider: string): Promise<UsageSnapshot> {
@@ -916,7 +1013,10 @@ export default function (pi: ExtensionAPI) {
     const dim = (s: string) => theme.fg("dim", s);
     const bar = renderUsageBar(window.usedPercent, Math.max(4, options?.barWidth ?? 10), theme);
     const pct = dim(`${Math.round(window.usedPercent)}%`);
-    const timeStr = options?.includeReset === false || !window.resetsIn ? "" : " " + dim(window.resetsIn);
+    const timeStr =
+      options?.includeReset === false || window.resetsAt === undefined
+        ? ""
+        : " " + dim(formatResetTime(new Date(window.resetsAt)));
     return `${dim(window.label)} ${bar} ${pct}${timeStr}`;
   }
 
@@ -983,58 +1083,62 @@ export default function (pi: ExtensionAPI) {
     if (refreshGitCache()) tuiRef?.requestRender();
   }
 
-  /** Fetch usage for the active provider. Shows cached data immediately,
-   *  then fetches fresh in the background. Discards results if provider
-   *  changed while the fetch was in flight. */
-  function fetchUsage(modelProvider: string): void {
-    const provider = detectProvider(modelProvider);
-    if (!provider) {
-      activeProvider = null;
-      latestUsage = null;
-      stopRefreshTimer();
-      tuiRef?.requestRender();
+  function showSnapshot(provider: string, snapshot: UsageSnapshot | undefined): void {
+    if (activeProvider !== provider) return;
+    const fresh = snapshot && Date.now() - snapshot.fetchedAt < USAGE_MAX_STALE;
+    latestUsage = fresh ? snapshot : null;
+    tuiRef?.requestRender();
+  }
+
+  /** Show the shared cached usage, and fetch only if it's due. Coordination is best-effort:
+   *  the fetcher pushes nextFetchAt forward first, so other instances skip while it works. */
+  function syncUsage(provider: string): void {
+    const credential = getCredential(provider);
+    if (!credential) {
+      showSnapshot(provider, undefined);
       return;
     }
 
-    activeProvider = provider;
+    const path = sharedUsagePath(provider, credential);
+    const shared = readSharedUsage(path);
+    showSnapshot(provider, shared?.snapshot);
+    if (shared && Date.now() < shared.nextFetchAt) return;
 
-    // Show cached data immediately if available
-    const cached = usageCache.get(provider);
-    if (cached && cached.windows.length > 0) {
-      latestUsage = cached;
-      tuiRef?.requestRender();
-    }
+    writeSharedUsage(path, { snapshot: shared?.snapshot, nextFetchAt: Date.now() + USAGE_CLAIM });
 
-    // Fetch fresh in background — keep cached data on transient errors
     fetchUsageForProvider(provider)
       .then((u) => {
-        if (!u || activeProvider !== provider) return;
-        if (u.windows.length === 0 && u.error && cached?.windows.length) return;
-        usageCache.set(provider, u);
-        latestUsage = u;
-        tuiRef?.requestRender();
+        const now = Date.now();
+        const latest = readSharedUsage(path);
+        const next: SharedUsage = u.error
+          ? {
+              snapshot: latest?.snapshot,
+              // Never shorten a backoff another instance may have recorded meanwhile.
+              nextFetchAt: Math.max(now + (u.retryAfterMs ?? USAGE_ERROR_RETRY), latest?.nextFetchAt ?? 0),
+            }
+          : { snapshot: u, nextFetchAt: now + USAGE_TTL };
+        writeSharedUsage(path, next);
+        showSnapshot(provider, next.snapshot);
       })
       .catch(() => {});
   }
 
-  /** Start (or restart) the periodic refresh timer. */
+  function selectProvider(modelProvider: string): void {
+    activeProvider = detectProvider(modelProvider);
+    if (activeProvider) {
+      syncUsage(activeProvider);
+    } else {
+      latestUsage = null;
+      tuiRef?.requestRender();
+    }
+  }
+
+  /** Re-read the shared cache periodically; also keeps reset countdowns ticking. */
   function startRefreshTimer(): void {
     if (refreshTimer) clearInterval(refreshTimer);
     refreshTimer = setInterval(() => {
-      if (activeProvider) {
-        const provider = activeProvider;
-        const cached = usageCache.get(provider);
-        fetchUsageForProvider(provider)
-          .then((u) => {
-            if (!u || activeProvider !== provider) return;
-            if (u.windows.length === 0 && u.error && cached?.windows.length) return;
-            usageCache.set(provider, u);
-            latestUsage = u;
-            tuiRef?.requestRender();
-          })
-          .catch(() => {});
-      }
-    }, USAGE_REFRESH_INTERVAL);
+      if (activeProvider) syncUsage(activeProvider);
+    }, USAGE_CHECK_INTERVAL);
   }
 
   function stopRefreshTimer(): void {
@@ -1058,10 +1162,8 @@ export default function (pi: ExtensionAPI) {
 
       // Initial fetch inside factory — tui is guaranteed available here,
       // so requestRender() will work when the async fetch completes.
-      if (ctx.model?.provider) {
-        fetchUsage(ctx.model.provider);
-        startRefreshTimer();
-      }
+      if (ctx.model?.provider) selectProvider(ctx.model.provider);
+      startRefreshTimer();
 
       return {
         dispose: () => {
@@ -1158,10 +1260,8 @@ export default function (pi: ExtensionAPI) {
     refreshGitFooter();
   });
 
-  // Refresh when model changes — fetch immediately, restart timer
   pi.on("model_select", (event, _ctx) => {
     if (!event.model?.provider) return;
-    fetchUsage(event.model.provider);
-    startRefreshTimer(); // reset the 5min countdown since we just fetched
+    selectProvider(event.model.provider);
   });
 }
