@@ -104,7 +104,8 @@ export function capImages(messages: AgentMessage[], options: ImageCapOptions): A
 export default function anthropicImageCap(pi: ExtensionAPI): void {
 	pi.on("context", (event, ctx) => {
 		const model = ctx.model;
-		if (model?.provider !== "anthropic") return;
+		// Gate on the wire API, not the provider name, so proxies serving Claude are covered too.
+		if (model?.api !== "anthropic-messages") return;
 
 		const messages = capImages(event.messages, {
 			maxImages: model.contextWindow > 200_000 ? MAX_IMAGES_1M_CONTEXT : MAX_IMAGES,

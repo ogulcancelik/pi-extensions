@@ -20,7 +20,7 @@ Your saved session keeps every image. Only the outgoing request changes, and not
 
 Images are dropped in batches, not one per turn. That keeps the start of the conversation the same between trims, so Anthropic's prompt cache stays valid.
 
-Other providers are not touched.
+It applies to every model that uses the Anthropic Messages API (`api: "anthropic-messages"`), whatever its provider, so Claude served through a proxy such as CLIProxyAPI is covered too. Models on other APIs are not touched.
 
 ## Install
 

@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { type AgentMessage, capImages, type ImageCapOptions, PLACEHOLDER_TEXT, selectDroppedImages } from "./index.ts";
+import anthropicImageCap, {
+	type AgentMessage,
+	capImages,
+	IMAGE_BYTE_CAP,
+	type ImageCapOptions,
+	PLACEHOLDER_TEXT,
+	selectDroppedImages,
+} from "./index.ts";
 
 const options = (overrides: Partial<ImageCapOptions> = {}): ImageCapOptions => ({
 	maxImages: 100,
@@ -64,5 +71,38 @@ describe("capImages", () => {
 		expect(result[2]).toEqual({ ...toolResult, content: [{ type: "text", text: PLACEHOLDER_TEXT }] });
 		expect(result[3]).toBe(latest);
 		expect(user.content).toHaveLength(2);
+	});
+});
+
+describe("context hook", () => {
+	type Handler = (event: { messages: AgentMessage[] }, ctx: { model?: unknown }) => { messages: AgentMessage[] } | undefined;
+
+	const register = (): Handler => {
+		let handler: Handler | undefined;
+		anthropicImageCap({ on: (_event: string, fn: Handler) => (handler = fn) } as never);
+		if (!handler) throw new Error("context handler not registered");
+		return handler;
+	};
+
+	// Two images that together exceed the byte cap, so the older one must go.
+	const oversized = (): AgentMessage[] => [
+		{ role: "user", content: [image(IMAGE_BYTE_CAP / 2 + 1)], timestamp: 1 },
+		{ role: "user", content: [image(IMAGE_BYTE_CAP / 2 + 1)], timestamp: 2 },
+	];
+
+	const model = (provider: string, api: string) => ({ provider, api, contextWindow: 200_000 });
+
+	test("trims for any provider speaking the anthropic messages api", () => {
+		const handler = register();
+		for (const provider of ["anthropic", "cliproxyapi"]) {
+			const result = handler({ messages: oversized() }, { model: model(provider, "anthropic-messages") });
+			expect(result?.messages[0].content).toEqual([{ type: "text", text: PLACEHOLDER_TEXT }]);
+		}
+	});
+
+	test("leaves other apis and a missing model alone", () => {
+		const handler = register();
+		expect(handler({ messages: oversized() }, { model: model("openai", "openai-responses") })).toBeUndefined();
+		expect(handler({ messages: oversized() }, {})).toBeUndefined();
 	});
 });
