@@ -266,4 +266,174 @@ describe("pi-herdr", () => {
 		expect(calls).toEqual([["agent", "send-keys", "reviewer", "esc", "ctrl+c"]]);
 		expect(result.content[0].text).toBe("Sent esc ctrl+c to reviewer");
 	});
+
+	describe("machine", () => {
+		const remotePane = {
+			...currentPane,
+			pane_id: "w2:p1",
+			workspace_id: "w2",
+			tab_id: "w2:t1",
+			cwd: "/remote/repo",
+			foreground_cwd: "/remote/repo",
+		};
+
+		function rejectCurrent(args: string[]) {
+			const command = args[0] === "--machine" ? args.slice(2) : args;
+			if (command[0] === "pane" && command[1] === "current") throw new Error("remote calls must not resolve the caller pane");
+		}
+
+		test("lists saved machines", async () => {
+			const calls: string[][] = [];
+			const tools = registerTools((args) => {
+				calls.push(args);
+				return JSON.stringify([
+					{ id: "abc123", label: "devbox", target: "devbox", session: "default", enabled: true, selected: false },
+					{ id: "def456", label: "box", target: "me@box.local", session: "default", enabled: false, selected: false },
+				]);
+			});
+
+			const result = await tools.get("herdr_layout").execute("test", { action: "machine_list" }, undefined, undefined, {});
+
+			expect(calls).toEqual([["machine", "list", "--json"]]);
+			expect(result.content[0].text).toBe("devbox: [abc123]\nbox: [def456] (target me@box.local, disabled)");
+			expect(result.details.machines).toHaveLength(2);
+		});
+
+		test("prefixes agent commands with --machine", async () => {
+			const calls: string[][] = [];
+			const tools = registerTools((args) => {
+				calls.push(args);
+				return { type: "agent_prompted", agent: { ...reviewer, agent_status: "done" } };
+			});
+
+			await tools.get("herdr_agent").execute(
+				"test",
+				{ action: "prompt", target: "w2:p1", prompt: "hi", machine: "devbox" },
+				undefined,
+				undefined,
+				{},
+			);
+
+			expect(calls).toEqual([["--machine", "devbox", "agent", "prompt", "w2:p1", "hi", "--wait"]]);
+		});
+
+		test("rejects machine values that look like flags", async () => {
+			const tools = registerTools(() => ({ type: "agent_list", agents: [] }));
+
+			await expect(
+				tools.get("herdr_agent").execute("test", { action: "list", machine: "--help" }, undefined, undefined, {}),
+			).rejects.toThrow("Invalid machine");
+		});
+
+		test("refuses caller-relative current on a remote machine", async () => {
+			const tools = registerTools((args) => {
+				rejectCurrent(args);
+				return {};
+			});
+
+			await expect(
+				tools.get("herdr_layout").execute("test", { action: "current", machine: "devbox" }, undefined, undefined, {}),
+			).rejects.toThrow("not available with 'machine'");
+		});
+
+		test("lists every remote pane when no workspace is given", async () => {
+			const calls: string[][] = [];
+			const tools = registerTools((args) => {
+				calls.push(args);
+				rejectCurrent(args);
+				return { type: "pane_list", panes: [remotePane] };
+			});
+
+			const result = await tools.get("herdr_layout").execute(
+				"test",
+				{ action: "pane_list", machine: "devbox" },
+				undefined,
+				undefined,
+				{},
+			);
+
+			expect(calls).toEqual([["--machine", "devbox", "pane", "list"]]);
+			expect(result.content[0].text).not.toContain("current");
+		});
+
+		test("requires an explicit pane to split on a remote machine", async () => {
+			const tools = registerTools((args) => {
+				rejectCurrent(args);
+				return {};
+			});
+
+			await expect(
+				tools.get("herdr_layout").execute("test", { action: "pane_split", machine: "devbox" }, undefined, undefined, {}),
+			).rejects.toThrow("'pane' is required for pane_split with 'machine'");
+		});
+
+		test("splits a remote pane using the remote pane's cwd", async () => {
+			const calls: string[][] = [];
+			const splitPane = { ...remotePane, pane_id: "w2:p2" };
+			const tools = registerTools((args) => {
+				calls.push(args);
+				rejectCurrent(args);
+				if (args[2] === "pane" && args[3] === "get") return { type: "pane_info", pane: remotePane };
+				if (args[2] === "pane" && args[3] === "split") return { type: "pane_info", pane: splitPane };
+				throw new Error(`unexpected command: ${args.join(" ")}`);
+			});
+
+			const result = await tools.get("herdr_layout").execute(
+				"test",
+				{ action: "pane_split", pane: "w2:p1", direction: "down", machine: "devbox" },
+				undefined,
+				undefined,
+				{},
+			);
+
+			expect(calls).toEqual([
+				["--machine", "devbox", "pane", "get", "w2:p1"],
+				["--machine", "devbox", "pane", "split", "w2:p1", "--direction", "down", "--cwd", "/remote/repo", "--no-focus"],
+			]);
+			expect(result.details.pane.pane_id).toBe("w2:p2");
+		});
+
+		test("leaves cwd to the remote server when creating a workspace", async () => {
+			const calls: string[][] = [];
+			const tools = registerTools((args) => {
+				calls.push(args);
+				rejectCurrent(args);
+				return {
+					type: "workspace_created",
+					workspace: { workspace_id: "w3", label: "ops", focused: false, agent_status: "unknown" },
+					tab: { tab_id: "w3:t1", workspace_id: "w3", label: "1", focused: false, agent_status: "unknown" },
+					root_pane: { ...remotePane, pane_id: "w3:p1" },
+				};
+			});
+
+			await tools.get("herdr_layout").execute(
+				"test",
+				{ action: "workspace_create", label: "ops", machine: "devbox" },
+				undefined,
+				undefined,
+				{},
+			);
+
+			expect(calls).toEqual([["--machine", "devbox", "workspace", "create", "--label", "ops", "--no-focus"]]);
+		});
+
+		test("closes a remote pane whose ID matches the caller pane", async () => {
+			const calls: string[][] = [];
+			const tools = registerTools((args) => {
+				calls.push(args);
+				rejectCurrent(args);
+				return { type: "ok" };
+			});
+
+			await tools.get("herdr_pane").execute(
+				"test",
+				{ action: "close", pane: currentPane.pane_id, machine: "devbox" },
+				undefined,
+				undefined,
+				{},
+			);
+
+			expect(calls).toEqual([["--machine", "devbox", "pane", "close", "w1:p1"]]);
+		});
+	});
 });
