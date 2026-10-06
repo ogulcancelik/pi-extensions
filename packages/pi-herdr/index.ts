@@ -66,6 +66,14 @@ interface PaneLayoutSnapshot {
 	splits: Array<{ id: string; direction: SplitDirection; ratio: number; rect: PaneLayoutRect }>;
 }
 
+interface MachineInfo {
+	id: string;
+	label: string;
+	target: string;
+	session?: string;
+	enabled: boolean;
+}
+
 interface HerdrJsonEnvelope {
 	result?: unknown;
 	error?: {
@@ -116,6 +124,19 @@ const AgentKindEnum = StringEnum(
 	] as const,
 	{ description: "Supported coding agent kind and canonical executable" },
 );
+
+const MachineParam = Type.Optional(
+	Type.String({
+		description:
+			"Saved Herdr SSH machine label or ID from herdr_layout machine_list. Omit for the local Herdr server. Workspace, tab, and pane IDs belong to one machine.",
+	}),
+);
+
+function machineArgs(machine?: string): string[] {
+	if (machine === undefined) return [];
+	if (!machine || machine.startsWith("-")) throw new Error(`Invalid machine: '${machine}'`);
+	return ["--machine", machine];
+}
 
 function parseHerdrError(output: string): string | null {
 	const trimmed = output.trim();
@@ -190,6 +211,13 @@ function summarizeTab(tab: TabInfo): string {
 	return `${tab.label}: [${tab.tab_id}]${flags ? ` (${flags})` : ""}`;
 }
 
+function summarizeMachine(machine: MachineInfo): string {
+	const flags = [machine.target !== machine.label ? `target ${machine.target}` : null, machine.enabled ? null : "disabled"]
+		.filter(Boolean)
+		.join(", ");
+	return `${machine.label}: [${machine.id}]${flags ? ` (${flags})` : ""}`;
+}
+
 function summarizeWorkspace(workspace: WorkspaceInfo): string {
 	const flags = [
 		workspace.focused ? "focused" : null,
@@ -212,6 +240,7 @@ function renderToolCall(tool: string, args: Record<string, any>, theme: any, con
 	if (args.command) text += theme.fg("dim", ` › ${args.command}`);
 	if (args.prompt) text += theme.fg("dim", ` › ${args.prompt}`);
 	if (args.match) text += theme.fg("dim", ` › ${args.match}`);
+	if (args.machine) text += theme.fg("dim", ` @${args.machine}`);
 	component.setText(text);
 	return component;
 }
@@ -257,7 +286,8 @@ function renderToolResult(result: any, options: { expanded: boolean; isPartial: 
 export default function (pi: ExtensionAPI) {
 	if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return;
 
-	async function execHerdr(args: string[], signal?: AbortSignal) {
+	async function execHerdr(args: string[], signal?: AbortSignal, machine?: string) {
+		args = [...machineArgs(machine), ...args];
 		const result = await pi.exec("herdr", args, { signal });
 		if (signal?.aborted || result.killed) throw new Error("Aborted");
 		if (result.code !== 0) {
@@ -270,8 +300,8 @@ export default function (pi: ExtensionAPI) {
 		return result;
 	}
 
-	async function execHerdrJson<T>(args: string[], signal?: AbortSignal): Promise<T> {
-		const result = await execHerdr(args, signal);
+	async function execHerdrJson<T>(args: string[], signal?: AbortSignal, machine?: string): Promise<T> {
+		const result = await execHerdr(args, signal, machine);
 		const stdout = result.stdout.trim();
 		if (!stdout) throw new Error(`Expected JSON output from herdr ${args.join(" ")}`);
 		let value: HerdrJsonEnvelope;
@@ -284,8 +314,8 @@ export default function (pi: ExtensionAPI) {
 		return value as T;
 	}
 
-	async function execHerdrText(args: string[], signal?: AbortSignal): Promise<string> {
-		return (await execHerdr(args, signal)).stdout;
+	async function execHerdrText(args: string[], signal?: AbortSignal, machine?: string): Promise<string> {
+		return (await execHerdr(args, signal, machine)).stdout;
 	}
 
 	async function getCurrentPane(signal?: AbortSignal): Promise<PaneInfo> {
@@ -293,15 +323,16 @@ export default function (pi: ExtensionAPI) {
 		return response.result.pane;
 	}
 
-	async function getPane(paneId: string, signal?: AbortSignal): Promise<PaneInfo> {
-		const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(["pane", "get", paneId], signal);
+	async function getPane(paneId: string, signal?: AbortSignal, machine?: string): Promise<PaneInfo> {
+		const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(["pane", "get", paneId], signal, machine);
 		return response.result.pane;
 	}
 
-	async function getPaneLayout(paneId: string, signal?: AbortSignal): Promise<PaneLayoutSnapshot> {
+	async function getPaneLayout(paneId: string, signal?: AbortSignal, machine?: string): Promise<PaneLayoutSnapshot> {
 		const response = await execHerdrJson<{ result: { layout: PaneLayoutSnapshot } }>(
 			["pane", "layout", "--pane", paneId],
 			signal,
+			machine,
 		);
 		return response.result.layout;
 	}
@@ -316,11 +347,13 @@ export default function (pi: ExtensionAPI) {
 			"Use herdr_layout, herdr_pane, and herdr_agent only when the user explicitly mentions Herdr or asks to inspect or control Herdr.",
 			"Use herdr_layout to create terminal topology before starting a process or agent. Default to a sibling pane in the caller's current tab and cwd; create a tab or workspace only when requested.",
 			"Read opaque workspace, tab, and pane IDs from herdr_layout results instead of constructing them, and preserve UI focus unless the user asks to switch context.",
+			"To control Herdr on a saved SSH machine, pass machine with a label from herdr_layout machine_list to every herdr tool call. IDs from one machine are meaningless on another.",
 		],
 		parameters: Type.Object({
 			action: StringEnum(
 				[
 					"current",
+					"machine_list",
 					"workspace_list",
 					"workspace_create",
 					"workspace_focus",
@@ -342,20 +375,39 @@ export default function (pi: ExtensionAPI) {
 			direction: Type.Optional(DirectionEnum),
 			cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the caller pane's foreground cwd." })),
 			focus: Type.Optional(Type.Boolean({ description: "Change UI focus after creation. Defaults to false." })),
+			machine: MachineParam,
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+			const machine = params.machine;
 			switch (params.action) {
 				case "current": {
+					if (machine) {
+						throw new Error("'current' refers to the pane pi runs in and is not available with 'machine'. Use pane_list or herdr_agent list on that machine.");
+					}
 					const pane = await getCurrentPane(signal);
 					return {
 						content: [{ type: "text", text: summarizePane(pane, pane.pane_id) }],
 						details: { action: "current", pane },
 					};
 				}
+				case "machine_list": {
+					const stdout = (await execHerdrText(["machine", "list", "--json"], signal)).trim();
+					let machines: MachineInfo[];
+					try {
+						machines = stdout ? (JSON.parse(stdout) as MachineInfo[]) : [];
+					} catch {
+						throw new Error("Failed to parse JSON from herdr machine list --json");
+					}
+					return {
+						content: [{ type: "text", text: machines.length ? machines.map(summarizeMachine).join("\n") : "No saved machines." }],
+						details: { action: "machine_list", machines },
+					};
+				}
 				case "workspace_list": {
 					const response = await execHerdrJson<{ result: { workspaces: WorkspaceInfo[] } }>(
 						["workspace", "list"],
 						signal,
+						machine,
 					);
 					const workspaces = response.result.workspaces || [];
 					return {
@@ -364,13 +416,18 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 				case "workspace_create": {
-					const current = await getCurrentPane(signal);
-					const args = ["workspace", "create", "--cwd", params.cwd || current.foreground_cwd || current.cwd || process.cwd()];
+					const args = ["workspace", "create"];
+					if (params.cwd) {
+						args.push("--cwd", params.cwd);
+					} else if (!machine) {
+						const current = await getCurrentPane(signal);
+						args.push("--cwd", current.foreground_cwd || current.cwd || process.cwd());
+					}
 					if (params.label) args.push("--label", params.label);
 					args.push(params.focus === true ? "--focus" : "--no-focus");
 					const response = await execHerdrJson<{
 						result: { workspace: WorkspaceInfo; tab: TabInfo; root_pane: PaneInfo };
-					}>(args, signal);
+					}>(args, signal, machine);
 					const { workspace, tab, root_pane: rootPane } = response.result;
 					return {
 						content: [{ type: "text", text: `Created workspace ${workspace.workspace_id}, tab ${tab.tab_id}, root pane ${rootPane.pane_id}` }],
@@ -382,6 +439,7 @@ export default function (pi: ExtensionAPI) {
 					const response = await execHerdrJson<{ result: { workspace: WorkspaceInfo } }>(
 						["workspace", "focus", params.workspace],
 						signal,
+						machine,
 					);
 					return {
 						content: [{ type: "text", text: `Focused workspace ${response.result.workspace.workspace_id}` }],
@@ -391,7 +449,7 @@ export default function (pi: ExtensionAPI) {
 				case "tab_list": {
 					const args = ["tab", "list"];
 					if (params.workspace) args.push("--workspace", params.workspace);
-					const response = await execHerdrJson<{ result: { tabs: TabInfo[] } }>(args, signal);
+					const response = await execHerdrJson<{ result: { tabs: TabInfo[] } }>(args, signal, machine);
 					const tabs = response.result.tabs || [];
 					return {
 						content: [{ type: "text", text: tabs.length ? tabs.map(summarizeTab).join("\n") : "No tabs." }],
@@ -399,12 +457,14 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 				case "tab_create": {
-					const current = await getCurrentPane(signal);
-					const args = ["tab", "create", "--workspace", params.workspace || current.workspace_id];
-					args.push("--cwd", params.cwd || current.foreground_cwd || current.cwd || process.cwd());
+					if (machine && !params.workspace) throw new Error("'workspace' is required for tab_create with 'machine'");
+					const current = machine ? undefined : await getCurrentPane(signal);
+					const args = ["tab", "create", "--workspace", params.workspace || current!.workspace_id];
+					const cwd = params.cwd || (current ? current.foreground_cwd || current.cwd || process.cwd() : undefined);
+					if (cwd) args.push("--cwd", cwd);
 					if (params.label) args.push("--label", params.label);
 					args.push(params.focus === true ? "--focus" : "--no-focus");
-					const response = await execHerdrJson<{ result: { tab: TabInfo; root_pane: PaneInfo } }>(args, signal);
+					const response = await execHerdrJson<{ result: { tab: TabInfo; root_pane: PaneInfo } }>(args, signal, machine);
 					const { tab, root_pane: rootPane } = response.result;
 					return {
 						content: [{ type: "text", text: `Created tab ${tab.tab_id}, root pane ${rootPane.pane_id}` }],
@@ -413,41 +473,49 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "tab_focus": {
 					if (!params.tab) throw new Error("'tab' is required for tab_focus");
-					const response = await execHerdrJson<{ result: { tab: TabInfo } }>(["tab", "focus", params.tab], signal);
+					const response = await execHerdrJson<{ result: { tab: TabInfo } }>(["tab", "focus", params.tab], signal, machine);
 					return {
 						content: [{ type: "text", text: `Focused tab ${response.result.tab.tab_id}` }],
 						details: { action: "tab_focus", tab: response.result.tab },
 					};
 				}
 				case "pane_list": {
-					const current = await getCurrentPane(signal);
-					const workspaceId = params.workspace || current.workspace_id;
-					const response = await execHerdrJson<{ result: { panes: PaneInfo[] } }>(
-						["pane", "list", "--workspace", workspaceId],
-						signal,
-					);
+					// Remote: list the requested workspace, or every pane when none is given.
+					const current = machine ? undefined : await getCurrentPane(signal);
+					const workspaceId = params.workspace || current?.workspace_id;
+					const args = ["pane", "list"];
+					if (workspaceId) args.push("--workspace", workspaceId);
+					const response = await execHerdrJson<{ result: { panes: PaneInfo[] } }>(args, signal, machine);
 					const panes = response.result.panes || [];
 					return {
-						content: [{ type: "text", text: panes.length ? panes.map((pane) => summarizePane(pane, current.pane_id)).join("\n") : "No panes." }],
+						content: [{ type: "text", text: panes.length ? panes.map((pane) => summarizePane(pane, current?.pane_id)).join("\n") : "No panes." }],
 						details: { action: "pane_list", panes, workspaceId },
 					};
 				}
 				case "pane_layout": {
+					if (machine && !params.pane) throw new Error("'pane' is required for pane_layout with 'machine'");
 					const paneId = params.pane || (await getCurrentPane(signal)).pane_id;
-					const layout = await getPaneLayout(paneId, signal);
+					const layout = await getPaneLayout(paneId, signal, machine);
 					return {
 						content: [{ type: "text", text: JSON.stringify(layout, null, 2) }],
 						details: { action: "pane_layout", layout },
 					};
 				}
 				case "pane_split": {
-					const current = await getCurrentPane(signal);
-					const source = params.pane ? await getPane(params.pane, signal) : current;
-					const direction = params.direction || chooseSplitDirection(await getPaneLayout(source.pane_id, signal), source.pane_id);
-					const cwd = params.cwd || source.foreground_cwd || source.cwd || current.foreground_cwd || current.cwd || process.cwd();
-					const args = ["pane", "split", source.pane_id, "--direction", direction, "--cwd", cwd];
+					if (machine && !params.pane) throw new Error("'pane' is required for pane_split with 'machine'");
+					const current = machine ? undefined : await getCurrentPane(signal);
+					const source = params.pane ? await getPane(params.pane, signal, machine) : current!;
+					const direction =
+						params.direction || chooseSplitDirection(await getPaneLayout(source.pane_id, signal, machine), source.pane_id);
+					const cwd =
+						params.cwd ||
+						source.foreground_cwd ||
+						source.cwd ||
+						(current ? current.foreground_cwd || current.cwd || process.cwd() : undefined);
+					const args = ["pane", "split", source.pane_id, "--direction", direction];
+					if (cwd) args.push("--cwd", cwd);
 					args.push(params.focus === true ? "--focus" : "--no-focus");
-					const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(args, signal);
+					const response = await execHerdrJson<{ result: { pane: PaneInfo } }>(args, signal, machine);
 					const pane = response.result.pane;
 					return {
 						content: [{ type: "text", text: `Created pane ${pane.pane_id} by splitting ${source.pane_id} ${direction}` }],
@@ -492,11 +560,12 @@ export default function (pi: ExtensionAPI) {
 			format: Type.Optional(OutputFormatEnum),
 			raw: Type.Optional(Type.Boolean({ description: "Keep ANSI escapes while matching wait_output" })),
 			timeout: Type.Optional(Type.Integer({ minimum: 1, description: "Wait timeout in milliseconds; omitted means indefinite" })),
+			machine: MachineParam,
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
 			switch (params.action) {
 				case "get": {
-					const pane = await getPane(params.pane, signal);
+					const pane = await getPane(params.pane, signal, params.machine);
 					return {
 						content: [{ type: "text", text: summarizePane(pane) }],
 						details: { action: "get", pane },
@@ -504,7 +573,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "run": {
 					if (!params.command) throw new Error("'command' is required for run");
-					await execHerdrJson(["pane", "run", params.pane, params.command], signal);
+					await execHerdrJson(["pane", "run", params.pane, params.command], signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Submitted command to pane ${params.pane}` }],
 						details: { action: "run", pane: params.pane, command: params.command },
@@ -514,7 +583,7 @@ export default function (pi: ExtensionAPI) {
 					const args = ["pane", "read", params.pane, "--source", params.source || "recent-unwrapped"];
 					if (params.lines != null) args.push("--lines", String(params.lines));
 					if (params.format) args.push("--format", params.format);
-					const output = await execHerdrText(args, signal);
+					const output = await execHerdrText(args, signal, params.machine);
 					return {
 						content: [{ type: "text", text: formatOutput(output) }],
 						details: { action: "read", pane: params.pane, read: true, source: params.source || "recent-unwrapped" },
@@ -535,7 +604,7 @@ export default function (pi: ExtensionAPI) {
 					if (params.raw) args.push("--raw");
 					const response = await execHerdrJson<{
 						result: { pane_id: string; matched_line: string; read?: { text?: string } };
-					}>(args, signal);
+					}>(args, signal, params.machine);
 					const matched = response.result;
 					const output = matched.read?.text || matched.matched_line;
 					return {
@@ -550,7 +619,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "send_text": {
 					if (!params.text) throw new Error("'text' is required for send_text");
-					await execHerdrJson(["pane", "send-text", params.pane, params.text], signal);
+					await execHerdrJson(["pane", "send-text", params.pane, params.text], signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Sent literal text to pane ${params.pane}` }],
 						details: { action: "send_text", pane: params.pane },
@@ -558,16 +627,19 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "send_keys": {
 					if (!params.keys?.length) throw new Error("'keys' is required for send_keys");
-					await execHerdrJson(["pane", "send-keys", params.pane, ...params.keys], signal);
+					await execHerdrJson(["pane", "send-keys", params.pane, ...params.keys], signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Sent ${params.keys.join(" ")} to pane ${params.pane}` }],
 						details: { action: "send_keys", pane: params.pane, keys: params.keys },
 					};
 				}
 				case "close": {
-					const current = await getCurrentPane(signal);
-					if (params.pane === current.pane_id) throw new Error("Refusing to close the pane pi is running in.");
-					await execHerdrJson(["pane", "close", params.pane], signal);
+					// The caller pane lives on the local server, and pane IDs repeat across machines.
+					if (!params.machine) {
+						const current = await getCurrentPane(signal);
+						if (params.pane === current.pane_id) throw new Error("Refusing to close the pane pi is running in.");
+					}
+					await execHerdrJson(["pane", "close", params.pane], signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Closed pane ${params.pane}` }],
 						details: { action: "close", pane: params.pane },
@@ -618,11 +690,12 @@ export default function (pi: ExtensionAPI) {
 			format: Type.Optional(OutputFormatEnum),
 			keys: Type.Optional(Type.Array(Type.String(), { description: "Logical UI keys such as esc, enter, up, or ctrl+c" })),
 			clearName: Type.Optional(Type.Boolean({ description: "Clear the current agent name for rename" })),
+			machine: MachineParam,
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
 			switch (params.action) {
 				case "list": {
-					const response = await execHerdrJson<{ result: { agents: AgentInfo[] } }>(["agent", "list"], signal);
+					const response = await execHerdrJson<{ result: { agents: AgentInfo[] } }>(["agent", "list"], signal, params.machine);
 					const agents = response.result.agents || [];
 					return {
 						content: [{ type: "text", text: agents.length ? agents.map(summarizeAgent).join("\n") : "No agents." }],
@@ -631,7 +704,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "get": {
 					if (!params.target) throw new Error("'target' is required for get");
-					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(["agent", "get", params.target], signal);
+					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(["agent", "get", params.target], signal, params.machine);
 					return {
 						content: [{ type: "text", text: summarizeAgent(response.result.agent) }],
 						details: { action: "get", agent: response.result.agent },
@@ -651,7 +724,7 @@ export default function (pi: ExtensionAPI) {
 						content: [{ type: "text", text: `Starting ${params.kind} as ${params.name} in ${params.pane}...` }],
 						details: { action: "start", waiting: true },
 					});
-					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal);
+					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Started ${summarizeAgent(response.result.agent)}` }],
 						details: { action: "start", agent: response.result.agent },
@@ -673,7 +746,7 @@ export default function (pi: ExtensionAPI) {
 							details: { action: "prompt", target: params.target, waiting: true },
 						});
 					}
-					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal);
+					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal, params.machine);
 					return {
 						content: [{ type: "text", text: `${shouldWait ? "Prompt settled" : "Prompt submitted"}: ${summarizeAgent(response.result.agent)}` }],
 						details: { action: "prompt", agent: response.result.agent },
@@ -688,7 +761,7 @@ export default function (pi: ExtensionAPI) {
 						content: [{ type: "text", text: `Waiting for agent ${params.target}...` }],
 						details: { action: "wait", target: params.target, waiting: true },
 					});
-					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal);
+					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Agent settled: ${summarizeAgent(response.result.agent)}` }],
 						details: { action: "wait", agent: response.result.agent },
@@ -699,7 +772,7 @@ export default function (pi: ExtensionAPI) {
 					const args = ["agent", "read", params.target, "--source", params.source || "recent-unwrapped"];
 					if (params.lines != null) args.push("--lines", String(params.lines));
 					if (params.format) args.push("--format", params.format as OutputFormat);
-					const output = await execHerdrText(args, signal);
+					const output = await execHerdrText(args, signal, params.machine);
 					return {
 						content: [{ type: "text", text: formatOutput(output) }],
 						details: { action: "read", target: params.target, read: true, source: params.source || "recent-unwrapped" },
@@ -708,7 +781,7 @@ export default function (pi: ExtensionAPI) {
 				case "send_keys": {
 					if (!params.target) throw new Error("'target' is required for send_keys");
 					if (!params.keys?.length) throw new Error("'keys' is required for send_keys");
-					await execHerdrJson(["agent", "send-keys", params.target, ...params.keys], signal);
+					await execHerdrJson(["agent", "send-keys", params.target, ...params.keys], signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Sent ${params.keys.join(" ")} to ${params.target}` }],
 						details: { action: "send_keys", target: params.target, keys: params.keys },
@@ -716,7 +789,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "focus": {
 					if (!params.target) throw new Error("'target' is required for focus");
-					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(["agent", "focus", params.target], signal);
+					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(["agent", "focus", params.target], signal, params.machine);
 					return {
 						content: [{ type: "text", text: `Focused ${agentDisplayName(response.result.agent)}` }],
 						details: { action: "focus", agent: response.result.agent },
@@ -727,7 +800,7 @@ export default function (pi: ExtensionAPI) {
 					if (!params.clearName && !params.name) throw new Error("'name' or 'clearName' is required for rename");
 					const args = ["agent", "rename", params.target];
 					args.push(params.clearName ? "--clear" : params.name!);
-					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal);
+					const response = await execHerdrJson<{ result: { agent: AgentInfo } }>(args, signal, params.machine);
 					return {
 						content: [{ type: "text", text: params.clearName ? `Cleared agent name for ${params.target}` : `Renamed agent to ${params.name}` }],
 						details: { action: "rename", agent: response.result.agent },
