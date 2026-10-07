@@ -34,11 +34,12 @@ The extension registers one tool for each primitive.
 
 ### `herdr_layout`
 
-Use `herdr_layout` to inspect and create workspaces, tabs, and pane topology.
+Use `herdr_layout` to inspect and create workspaces, tabs, and panes, or move panes between tabs and workspaces.
 
 | Action | Description |
 |---|---|
 | `current` | Inspect the pane running the current Pi process |
+| `machine_list` | List saved Herdr SSH machines |
 | `workspace_list` | List workspaces |
 | `workspace_create` | Create a workspace, first tab, and root pane |
 | `workspace_focus` | Focus a workspace |
@@ -48,10 +49,35 @@ Use `herdr_layout` to inspect and create workspaces, tabs, and pane topology.
 | `pane_list` | List panes in a workspace |
 | `pane_layout` | Inspect pane geometry |
 | `pane_split` | Split an existing pane |
+| `pane_move` | Move a pane into an existing tab, a new tab, or a new workspace |
 
 Creation defaults to the caller pane's foreground working directory and preserves UI focus. When `pane_split` omits a direction, the tool chooses right for a sufficiently wide pane and down for a narrow or tall pane.
 
 Workspace, tab, and pane IDs are opaque. Always use IDs returned by Herdr instead of constructing them.
+
+#### Moving a pane
+
+`pane_move` requires an explicit `pane` and exactly one destination mode:
+
+- `tab` with a required `direction` of `right` or `down`. Optional `targetPane` selects the destination pane to split; otherwise Herdr uses the tab's focused pane. Optional `ratio` sets the split ratio.
+- `newTab: true`. Optional `workspace` selects the destination workspace; otherwise Herdr uses the source workspace. Optional `label` names the new tab.
+- `newWorkspace: true`. Optional `label` names the new workspace and `tabLabel` names its first tab.
+
+`workspace` is only valid with `newTab`, not as a substitute for `tab`. Moves preserve UI focus unless `focus: true`. Pass `machine` as usual for a saved SSH machine; moves stay on that machine.
+
+```json
+{ "action": "pane_move", "pane": "w1:p2", "tab": "w2:t1", "direction": "right", "targetPane": "w2:p1", "ratio": 0.5 }
+```
+
+```json
+{ "action": "pane_move", "pane": "w1:p2", "newTab": true, "workspace": "w2", "label": "review" }
+```
+
+```json
+{ "action": "pane_move", "pane": "w1:p2", "newWorkspace": true, "label": "review", "tabLabel": "agent" }
+```
+
+The pane ID can change after a move, especially across workspaces. The result reports the returned pane ID, tab ID, and workspace ID. Use that pane ID for all subsequent calls, not the old ID. Agent names follow the pane and remain valid targets for `herdr_agent`. Do not move panes you did not create unless the user explicitly asks.
 
 ### `herdr_pane`
 
@@ -142,6 +168,33 @@ Read the result:
 
 For an ordinary command, split a pane with `herdr_layout`, submit the command with `herdr_pane run`, then use `herdr_pane wait_output` or `herdr_pane read`.
 
+## Saved SSH machines
+
+Every tool accepts an optional `machine`: the label or ID of a machine saved with `herdr machine add`. Without it, tools target the local Herdr server. With it, each call runs as `herdr --machine <machine> ...` against that machine's session.
+
+Find saved machines first:
+
+```json
+{ "action": "machine_list" }
+```
+
+Then pass the label to every call for that machine:
+
+```json
+{ "action": "list", "machine": "devbox" }
+```
+
+Workspace, tab, and pane IDs belong to one machine. `w1:p1` on a remote machine is unrelated to `w1:p1` locally.
+
+The caller's pane is local, so nothing defaults to it on a remote machine:
+
+- `current` is local only.
+- `pane_split` and `pane_layout` require `pane`. `pane_move` always requires it, locally or remotely.
+- `tab_create` requires `workspace`.
+- `pane_list` without `workspace` lists every pane on the machine.
+- Creation actions pass `cwd` only when given, or for `pane_split`, the source pane's cwd. Otherwise the remote server picks.
+- `close` does not apply the caller-pane guard.
+
 ## Invocation policy
 
 The tools are opt-in. Pi uses them only when the user explicitly mentions Herdr or asks to inspect or control Herdr. Installing this package does not turn general background work or delegation into a Herdr workflow.
@@ -158,6 +211,7 @@ Full-screen agents may render through the terminal's alternate screen. Rows that
 
 - Pi 0.80 or newer
 - Herdr 0.7.5 or newer
+- Herdr 0.9.1 or newer on both machines to use `machine`
 - Pi running inside a Herdr pane
 
 ## License
