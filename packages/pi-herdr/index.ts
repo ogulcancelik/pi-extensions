@@ -37,6 +37,16 @@ interface PaneInfo {
 	agent_status: AgentStatus;
 }
 
+interface PaneMoveResult {
+	pane: PaneInfo;
+	previous_pane_id: string;
+	previous_tab_id: string;
+	previous_workspace_id: string;
+	created_tab?: TabInfo;
+	created_workspace?: WorkspaceInfo;
+	changed: boolean;
+}
+
 interface AgentInfo {
 	name?: string;
 	agent?: string;
@@ -95,7 +105,7 @@ const OutputFormatEnum = StringEnum(["text", "ansi"] as const, {
 });
 
 const DirectionEnum = StringEnum(["right", "down"] as const, {
-	description: "Split direction. When omitted, the tool chooses from the source pane geometry.",
+	description: "Split direction. pane_split chooses from source geometry when omitted. Required for pane_move into an existing tab.",
 });
 
 const AgentKindEnum = StringEnum(
@@ -341,12 +351,14 @@ export default function (pi: ExtensionAPI) {
 		name: "herdr_layout",
 		label: "Herdr Layout",
 		description:
-			"Create and inspect Herdr terminal topology. Workspaces contain tabs; tabs contain panes. Creating a workspace or tab also creates a root pane, while splitting creates another pane. Layout actions never start an agent or ordinary command. Read pane IDs from results and pass them to herdr_pane or herdr_agent. Creation defaults to the caller's cwd and preserves UI focus. pane_split defaults to the caller's pane and chooses right or down from its geometry.",
-		promptSnippet: "Inspect or create Herdr workspaces, tabs, and pane topology",
+			"Create and inspect Herdr terminal topology, or move panes between tabs and workspaces. Workspaces contain tabs; tabs contain panes. Creating a workspace or tab also creates a root pane, while splitting creates another pane. pane_move moves an explicit pane into an existing tab with direction, a newTab, or a newWorkspace. The pane ID can change; use the returned pane ID afterwards. Agent names follow the pane. Layout actions never start an agent or ordinary command. Read pane IDs from results and pass them to herdr_pane or herdr_agent. Creation defaults to the caller's cwd. Creation and moves preserve UI focus. pane_split defaults to the caller's pane and chooses right or down from its geometry.",
+		promptSnippet: "Inspect or create Herdr topology and move panes between tabs or workspaces",
 		promptGuidelines: [
 			"Use herdr_layout, herdr_pane, and herdr_agent only when the user explicitly mentions Herdr or asks to inspect or control Herdr.",
 			"Use herdr_layout to create terminal topology before starting a process or agent. Default to a sibling pane in the caller's current tab and cwd; create a tab or workspace only when requested.",
 			"Read opaque workspace, tab, and pane IDs from herdr_layout results instead of constructing them, and preserve UI focus unless the user asks to switch context.",
+			"Use herdr_layout pane_move with an explicit pane and exactly one destination: tab with direction, newTab, or newWorkspace. workspace is only valid with newTab. Pane IDs can change after a move; use the returned pane ID for all later calls. Agent names follow the pane.",
+			"Do not move a Herdr pane you did not create unless the user explicitly asks.",
 			"To control Herdr on a saved SSH machine, pass machine with a label from herdr_layout machine_list to every herdr tool call. IDs from one machine are meaningless on another.",
 		],
 		parameters: Type.Object({
@@ -363,18 +375,24 @@ export default function (pi: ExtensionAPI) {
 					"pane_list",
 					"pane_layout",
 					"pane_split",
+					"pane_move",
 				] as const,
 				{ description: "Layout action" },
 			),
-			workspace: Type.Optional(Type.String({ description: "Opaque workspace ID" })),
-			tab: Type.Optional(Type.String({ description: "Opaque tab ID" })),
+			workspace: Type.Optional(Type.String({ description: "Opaque workspace ID. For pane_move, only valid with newTab; omit to use the source workspace." })),
+			tab: Type.Optional(Type.String({ description: "Opaque tab ID. For pane_move, destination tab; requires direction and excludes newTab/newWorkspace." })),
 			pane: Type.Optional(
-				Type.String({ description: "Opaque source pane ID. Omit for current, pane_layout, or pane_split to use the caller's pane." }),
+				Type.String({ description: "Opaque source pane ID. Required for pane_move. Omit for current, pane_layout, or pane_split to use the caller's pane." }),
 			),
-			label: Type.Optional(Type.String({ description: "Label for a new workspace or tab" })),
+			label: Type.Optional(Type.String({ description: "Label for a new workspace or tab. For pane_move, only valid with newTab or newWorkspace." })),
 			direction: Type.Optional(DirectionEnum),
+			newTab: Type.Optional(Type.Boolean({ description: "For pane_move, create a destination tab, optionally in workspace. Excludes tab/newWorkspace." })),
+			newWorkspace: Type.Optional(Type.Boolean({ description: "For pane_move, create a destination workspace and tab. Excludes tab/newTab/workspace." })),
+			targetPane: Type.Optional(Type.String({ description: "Opaque destination pane ID to split for pane_move into an existing tab. Omit to use that tab's focused pane." })),
+			ratio: Type.Optional(Type.Number({ description: "Split ratio for pane_move into an existing tab. Omit for the Herdr default." })),
+			tabLabel: Type.Optional(Type.String({ description: "Label for the first tab when pane_move creates a newWorkspace." })),
 			cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the caller pane's foreground cwd." })),
-			focus: Type.Optional(Type.Boolean({ description: "Change UI focus after creation. Defaults to false." })),
+			focus: Type.Optional(Type.Boolean({ description: "Change UI focus after creation or pane_move. Defaults to false." })),
 			machine: MachineParam,
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
@@ -499,6 +517,39 @@ export default function (pi: ExtensionAPI) {
 					return {
 						content: [{ type: "text", text: JSON.stringify(layout, null, 2) }],
 						details: { action: "pane_layout", layout },
+					};
+				}
+				case "pane_move": {
+					if (!params.pane) throw new Error("'pane' is required for pane_move");
+					const destinations = Number(Boolean(params.tab)) + Number(params.newTab === true) + Number(params.newWorkspace === true);
+					if (destinations !== 1) throw new Error("pane_move requires exactly one of 'tab', 'newTab', or 'newWorkspace'");
+					if (params.workspace !== undefined && params.newTab !== true) throw new Error("'workspace' is only valid with 'newTab' for pane_move");
+					if (params.tabLabel !== undefined && params.newWorkspace !== true) throw new Error("'tabLabel' is only valid with 'newWorkspace' for pane_move");
+					if (params.label !== undefined && params.tab) throw new Error("'label' requires 'newTab' or 'newWorkspace' for pane_move");
+					if (!params.tab && (params.direction !== undefined || params.targetPane !== undefined || params.ratio !== undefined)) {
+						throw new Error("'direction', 'targetPane', and 'ratio' require 'tab' for pane_move");
+					}
+					const args = ["pane", "move", params.pane];
+					if (params.tab) {
+						if (!params.direction) throw new Error("'direction' is required for pane_move into an existing tab");
+						args.push("--tab", params.tab, "--split", params.direction);
+						if (params.targetPane) args.push("--target-pane", params.targetPane);
+						if (params.ratio != null) args.push("--ratio", String(params.ratio));
+					} else if (params.newTab === true) {
+						args.push("--new-tab");
+						if (params.workspace) args.push("--workspace", params.workspace);
+					} else {
+						args.push("--new-workspace");
+					}
+					if (params.label) args.push("--label", params.label);
+					if (params.tabLabel) args.push("--tab-label", params.tabLabel);
+					args.push(params.focus === true ? "--focus" : "--no-focus");
+					const response = await execHerdrJson<{ result: { move_result: PaneMoveResult } }>(args, signal, machine);
+					const moveResult = response.result.move_result;
+					const pane = moveResult.pane;
+					return {
+						content: [{ type: "text", text: `Moved pane ${moveResult.previous_pane_id} to pane ${pane.pane_id}, tab ${pane.tab_id}, workspace ${pane.workspace_id}. Use pane ${pane.pane_id} for subsequent calls; the pane ID can change after a move. Agent names follow the pane.` }],
+						details: { action: "pane_move", pane, sourcePaneId: moveResult.previous_pane_id, moveResult },
 					};
 				}
 				case "pane_split": {

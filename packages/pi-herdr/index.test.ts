@@ -120,6 +120,137 @@ describe("pi-herdr", () => {
 		expect(result.details.pane.pane_id).toBe("w1:p2");
 	});
 
+	describe("pane_move", () => {
+		const movedPane = { ...currentPane, pane_id: "w2:p6", tab_id: "w2:t3", workspace_id: "w2" };
+		const moveResult = {
+			changed: true,
+			pane: movedPane,
+			previous_pane_id: "w1:p2",
+			previous_tab_id: "w1:t1",
+			previous_workspace_id: "w1",
+		};
+
+		test("documents the action and changed pane IDs in the schema and prompts", () => {
+			const tool = registerTools(() => ({})).get("herdr_layout");
+			expect(JSON.stringify(tool.parameters.properties.action)).toContain("pane_move");
+			expect(tool.parameters.properties.pane.description).toContain("Required for pane_move");
+			expect(tool.parameters.properties.focus.description).toContain("Defaults to false");
+			expect(tool.description).toContain("use the returned pane ID afterwards");
+			expect(tool.promptGuidelines.join("\n")).toContain("Agent names follow the pane");
+		});
+
+		const modes = [
+			{
+				name: "existing tab with default target and ratio",
+				params: { tab: "w2:t3", direction: "down" },
+				flags: ["--tab", "w2:t3", "--split", "down", "--no-focus"],
+			},
+			{
+				name: "existing tab with target, ratio, and focus",
+				params: { tab: "w2:t3", direction: "right", targetPane: "w2:p1", ratio: 0.4, focus: true },
+				flags: ["--tab", "w2:t3", "--split", "right", "--target-pane", "w2:p1", "--ratio", "0.4", "--focus"],
+			},
+			{
+				name: "new tab in the source workspace",
+				params: { newTab: true },
+				flags: ["--new-tab", "--no-focus"],
+			},
+			{
+				name: "new tab in an explicit workspace with label and focus",
+				params: { newTab: true, workspace: "w2", label: "review tab", focus: true },
+				flags: ["--new-tab", "--workspace", "w2", "--label", "review tab", "--focus"],
+			},
+			{
+				name: "new workspace with default labels",
+				params: { newWorkspace: true, focus: false },
+				flags: ["--new-workspace", "--no-focus"],
+			},
+			{
+				name: "new workspace with both labels and focus",
+				params: { newWorkspace: true, label: "review workspace", tabLabel: "agent tab", focus: true },
+				flags: ["--new-workspace", "--label", "review workspace", "--tab-label", "agent tab", "--focus"],
+			},
+		];
+
+		for (const machine of [undefined, "devbox"]) {
+			for (const mode of modes) {
+				test(`moves to ${mode.name} ${machine ? "remotely" : "locally"} and returns the new IDs`, async () => {
+					const calls: string[][] = [];
+					const tools = registerTools((args) => {
+						calls.push(args);
+						return { type: "pane_move", move_result: moveResult };
+					});
+					const result = await tools.get("herdr_layout").execute(
+						"test",
+						{ action: "pane_move", pane: "w1:p2", ...mode.params, machine },
+						undefined,
+						undefined,
+						{},
+					);
+
+					expect(calls).toEqual([[
+						...(machine ? ["--machine", machine] : []), "pane", "move", "w1:p2", ...mode.flags,
+					]]);
+					expect(result.content[0].text).toContain("pane w2:p6, tab w2:t3, workspace w2");
+					expect(result.content[0].text).toContain("Use pane w2:p6 for subsequent calls");
+					expect(result.details.pane).toEqual(movedPane);
+					expect(result.details.sourcePaneId).toBe("w1:p2");
+					expect(result.details.moveResult).toEqual(moveResult);
+				});
+			}
+		}
+
+		const invalid = [
+			{ params: { newTab: true }, error: "'pane' is required" },
+			{ params: { pane: "w1:p2" }, error: "exactly one" },
+			{ params: { pane: "w1:p2", newTab: false, newWorkspace: false }, error: "exactly one" },
+			{ params: { pane: "w1:p2", newTab: true, newWorkspace: true }, error: "exactly one" },
+			{ params: { pane: "w1:p2", tab: "w2:t1", newTab: true }, error: "exactly one" },
+			{ params: { pane: "w1:p2", tab: "w2:t1", newWorkspace: true }, error: "exactly one" },
+			{ params: { pane: "w1:p2", tab: "w2:t1" }, error: "'direction' is required" },
+			{ params: { pane: "w1:p2", tab: "w2:t1", direction: "right", workspace: "w2" }, error: "'workspace' is only valid" },
+			{ params: { pane: "w1:p2", newWorkspace: true, workspace: "w2" }, error: "'workspace' is only valid" },
+			{ params: { pane: "w1:p2", newTab: true, tabLabel: "agent" }, error: "'tabLabel' is only valid" },
+			{ params: { pane: "w1:p2", tab: "w2:t1", direction: "right", label: "tab" }, error: "'label' requires" },
+			{ params: { pane: "w1:p2", newTab: true, direction: "right" }, error: "require 'tab'" },
+			{ params: { pane: "w1:p2", newWorkspace: true, targetPane: "w2:p1" }, error: "require 'tab'" },
+			{ params: { pane: "w1:p2", newTab: true, ratio: 0.5 }, error: "require 'tab'" },
+		];
+
+		for (const { params, error } of invalid) {
+			test(`rejects invalid move ${JSON.stringify(params)} before executing`, async () => {
+				const calls: string[][] = [];
+				const tools = registerTools((args) => {
+					calls.push(args);
+					return {};
+				});
+				await expect(
+					tools.get("herdr_layout").execute("test", { action: "pane_move", ...params }, undefined, undefined, {}),
+				).rejects.toThrow(error);
+				expect(calls).toEqual([]);
+			});
+		}
+
+		test("reports the returned IDs even when the pane ID stays the same", async () => {
+			const tools = registerTools(() => ({
+				type: "pane_move",
+				move_result: { ...moveResult, pane: { ...currentPane, tab_id: "w1:t2" }, previous_pane_id: "w1:p1" },
+			}));
+			const result = await tools.get("herdr_layout").execute(
+				"test", { action: "pane_move", pane: "w1:p1", newTab: true }, undefined, undefined, {},
+			);
+			expect(result.content[0].text).toContain("pane w1:p1, tab w1:t2, workspace w1");
+			expect(result.details.pane.pane_id).toBe("w1:p1");
+		});
+
+		test("propagates Herdr move errors", async () => {
+			const tools = registerTools(() => JSON.stringify({ error: { code: "pane_not_found", message: "No such pane" } }));
+			await expect(
+				tools.get("herdr_layout").execute("test", { action: "pane_move", pane: "w1:p2", newTab: true }, undefined, undefined, {}),
+			).rejects.toThrow("No such pane");
+		});
+	});
+
 	test("waits for ordinary output through pane wait-output", async () => {
 		const calls: string[][] = [];
 		const tools = registerTools((args) => {
