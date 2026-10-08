@@ -49,6 +49,11 @@ function registerTools(handler: (args: string[]) => unknown | string) {
 	return tools;
 }
 
+const plainTheme = {
+	bold: (text: string) => text,
+	fg: (_color: string, text: string) => text,
+};
+
 beforeEach(() => {
 	process.env.HERDR_ENV = "1";
 	process.env.HERDR_PANE_ID = currentPane.pane_id;
@@ -142,6 +147,79 @@ describe("pi-herdr", () => {
 
 		expect(calls).toEqual([["pane", "wait-output", "w1:p2", "--match", "ready", "--timeout", "30000"]]);
 		expect(result.content[0].text).toContain("server ready");
+	});
+
+	test("accepts empty output from payload-free pane mutations", async () => {
+		const calls: string[][] = [];
+		const tools = registerTools((args) => {
+			calls.push(args);
+			if (args[0] === "pane" && args[1] === "current") return { type: "pane_current", pane: currentPane };
+			return "";
+		});
+		const paneTool = tools.get("herdr_pane");
+
+		await paneTool.execute(
+			"run",
+			{ action: "run", pane: "w1:p2", command: "bun test" },
+			undefined,
+			undefined,
+			{},
+		);
+		await paneTool.execute(
+			"text",
+			{ action: "send_text", pane: "w1:p2", text: "hello" },
+			undefined,
+			undefined,
+			{},
+		);
+		await paneTool.execute(
+			"keys",
+			{ action: "send_keys", pane: "w1:p2", keys: ["ctrl+c"] },
+			undefined,
+			undefined,
+			{},
+		);
+		await paneTool.execute("close", { action: "close", pane: "w1:p2" }, undefined, undefined, {});
+
+		expect(calls).toEqual([
+			["pane", "run", "w1:p2", "bun test"],
+			["pane", "send-text", "w1:p2", "hello"],
+			["pane", "send-keys", "w1:p2", "ctrl+c"],
+			["pane", "current", "--current"],
+			["pane", "close", "w1:p2"],
+		]);
+	});
+
+	test("shows sent keys and escaped text in wrapped tool calls", () => {
+		const paneTool = registerTools(() => ({})).get("herdr_pane");
+		const keys = paneTool.renderCall(
+			{ action: "send_keys", pane: "w1:p2", keys: ["esc", "ctrl+c", "enter"] },
+			plainTheme,
+			{},
+		);
+		const text = paneTool.renderCall(
+			{ action: "send_text", pane: "w1:p2", text: `\u0002${"long ".repeat(12)}` },
+			plainTheme,
+			{},
+		);
+
+		expect(keys.render(80).join("\n")).toContain("› esc ctrl+c enter");
+		const textLines = text.render(40);
+		expect(textLines.join("\n")).toContain("\\u0002long");
+		expect(textLines.length).toBeGreaterThan(1);
+		expect(textLines.every((line: string) => line.length <= 40)).toBe(true);
+	});
+
+	test("renders failed tool results as errors instead of success", () => {
+		const paneTool = registerTools(() => ({})).get("herdr_pane");
+		const component = paneTool.renderResult(
+			{ content: [{ type: "text", text: "Expected JSON output" }], details: {} },
+			{ expanded: false, isPartial: false },
+			plainTheme,
+			{ isError: true },
+		);
+
+		expect(component.render(80).join("\n").trimEnd()).toBe("✗ Expected JSON output");
 	});
 
 	test("refuses to close the caller pane", async () => {
@@ -252,7 +330,7 @@ describe("pi-herdr", () => {
 		const calls: string[][] = [];
 		const tools = registerTools((args) => {
 			calls.push(args);
-			return { type: "ok" };
+			return "";
 		});
 
 		const result = await tools.get("herdr_agent").execute(

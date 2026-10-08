@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-herdr",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Pi-native tools for controlling Herdr layouts, panes, and coding agents.",
   "type": "module",
   "keywords": [

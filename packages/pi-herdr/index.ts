@@ -212,15 +212,23 @@ function renderToolCall(tool: string, args: Record<string, any>, theme: any, con
 	if (args.command) text += theme.fg("dim", ` › ${args.command}`);
 	if (args.prompt) text += theme.fg("dim", ` › ${args.prompt}`);
 	if (args.match) text += theme.fg("dim", ` › ${args.match}`);
+	if (args.text !== undefined) text += theme.fg("dim", ` › ${JSON.stringify(args.text)}`);
+	if (args.keys?.length) text += theme.fg("dim", ` › ${args.keys.join(" ")}`);
 	component.setText(text);
 	return component;
 }
 
-function renderToolResult(result: any, options: { expanded: boolean; isPartial: boolean }, theme: any) {
+function renderToolResult(
+	result: any,
+	options: { expanded: boolean; isPartial: boolean },
+	theme: any,
+	context?: { isError?: boolean },
+) {
 	if (options.isPartial) return new Text(theme.fg("warning", "◌ waiting"), 0, 0);
 	const details = result.details as Record<string, any> | undefined;
 	const content = result.content?.[0];
 	const rawText = content?.type === "text" ? content.text : "";
+	if (context?.isError) return new Text(theme.fg("error", `✗ ${rawText || "failed"}`), 0, 0);
 	if (!details) return new Text(rawText, 0, 0);
 
 	if (details.agent) {
@@ -459,8 +467,8 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, context) {
 			return renderToolCall("herdr_layout", args, theme, context);
 		},
-		renderResult(result, options, theme) {
-			return renderToolResult(result, options, theme);
+		renderResult(result, options, theme, context) {
+			return renderToolResult(result, options, theme, context);
 		},
 	});
 
@@ -504,7 +512,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "run": {
 					if (!params.command) throw new Error("'command' is required for run");
-					await execHerdrJson(["pane", "run", params.pane, params.command], signal);
+					await execHerdr(["pane", "run", params.pane, params.command], signal);
 					return {
 						content: [{ type: "text", text: `Submitted command to pane ${params.pane}` }],
 						details: { action: "run", pane: params.pane, command: params.command },
@@ -550,7 +558,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "send_text": {
 					if (!params.text) throw new Error("'text' is required for send_text");
-					await execHerdrJson(["pane", "send-text", params.pane, params.text], signal);
+					await execHerdr(["pane", "send-text", params.pane, params.text], signal);
 					return {
 						content: [{ type: "text", text: `Sent literal text to pane ${params.pane}` }],
 						details: { action: "send_text", pane: params.pane },
@@ -558,7 +566,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "send_keys": {
 					if (!params.keys?.length) throw new Error("'keys' is required for send_keys");
-					await execHerdrJson(["pane", "send-keys", params.pane, ...params.keys], signal);
+					await execHerdr(["pane", "send-keys", params.pane, ...params.keys], signal);
 					return {
 						content: [{ type: "text", text: `Sent ${params.keys.join(" ")} to pane ${params.pane}` }],
 						details: { action: "send_keys", pane: params.pane, keys: params.keys },
@@ -567,7 +575,7 @@ export default function (pi: ExtensionAPI) {
 				case "close": {
 					const current = await getCurrentPane(signal);
 					if (params.pane === current.pane_id) throw new Error("Refusing to close the pane pi is running in.");
-					await execHerdrJson(["pane", "close", params.pane], signal);
+					await execHerdr(["pane", "close", params.pane], signal);
 					return {
 						content: [{ type: "text", text: `Closed pane ${params.pane}` }],
 						details: { action: "close", pane: params.pane },
@@ -578,8 +586,8 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, context) {
 			return renderToolCall("herdr_pane", args, theme, context);
 		},
-		renderResult(result, options, theme) {
-			return renderToolResult(result, options, theme);
+		renderResult(result, options, theme, context) {
+			return renderToolResult(result, options, theme, context);
 		},
 	});
 
@@ -708,7 +716,7 @@ export default function (pi: ExtensionAPI) {
 				case "send_keys": {
 					if (!params.target) throw new Error("'target' is required for send_keys");
 					if (!params.keys?.length) throw new Error("'keys' is required for send_keys");
-					await execHerdrJson(["agent", "send-keys", params.target, ...params.keys], signal);
+					await execHerdr(["agent", "send-keys", params.target, ...params.keys], signal);
 					return {
 						content: [{ type: "text", text: `Sent ${params.keys.join(" ")} to ${params.target}` }],
 						details: { action: "send_keys", target: params.target, keys: params.keys },
@@ -738,8 +746,8 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, context) {
 			return renderToolCall("herdr_agent", args, theme, context);
 		},
-		renderResult(result, options, theme) {
-			return renderToolResult(result, options, theme);
+		renderResult(result, options, theme, context) {
+			return renderToolResult(result, options, theme, context);
 		},
 	});
 }
