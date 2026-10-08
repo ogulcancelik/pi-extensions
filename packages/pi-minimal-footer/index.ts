@@ -8,7 +8,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildSessionContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -161,8 +161,8 @@ function getEmailPrefixFromJwt(token: string): string | null {
 
 // ============ Auth Loading ============
 
-function loadAuthJson(): Record<string, any> {
-  const authPath = join(homedir(), ".pi", "agent", "auth.json");
+export function loadAuthJson(): Record<string, any> {
+  const authPath = join(getAgentDir(), "auth.json");
   try {
     if (existsSync(authPath)) {
       return JSON.parse(readFileSync(authPath, "utf-8"));
