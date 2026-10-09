@@ -48,6 +48,12 @@ interface GitCache {
   behind: number;
 }
 
+interface ContextInfo {
+  percentage: number | null;
+  used: number | null;
+  total: number;
+}
+
 // ============ Usage Cache ============
 
 // Usage is cached on disk and shared by every pi instance, so N open panes
@@ -965,14 +971,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   function renderContextGauge(
-    percentage: number,
+    percentage: number | null,
     theme: any,
-    used?: number,
+    used?: number | null,
     total?: number,
     options?: { barWidth?: number; includeCounts?: boolean }
   ): string {
     const barWidth = Math.max(4, options?.barWidth ?? CTX_GAUGE_WIDTH);
-    const clamped = Math.max(0, Math.min(100, percentage));
+    const known = percentage !== null;
+    const clamped = known ? Math.max(0, Math.min(100, percentage)) : 0;
     const filled = Math.round((clamped / 100) * barWidth);
     const empty = barWidth - filled;
 
@@ -983,11 +990,12 @@ export default function (pi: ExtensionAPI) {
     else color = "success";
 
     const bar = theme.fg(color, BAR_FILLED.repeat(filled)) + theme.fg("dim", BAR_EMPTY.repeat(empty));
-    const pct = `${Math.round(clamped)}%`;
-    const counts =
-      options?.includeCounts === false || used === undefined || !total
-        ? ""
-        : ` ${formatTokenCount(used)}/${formatTokenCount(total)}`;
+    const pct = known ? `${Math.round(clamped)}%` : "?";
+    let counts = "";
+    if (options?.includeCounts !== false && total) {
+      if (!known) counts = `/${formatTokenCount(total)}`;
+      else if (used != null) counts = ` ${formatTokenCount(used)}/${formatTokenCount(total)}`;
+    }
 
     return theme.fg("dim", "ctx ") + bar + " " + theme.fg("dim", pct + counts);
   }
@@ -1049,7 +1057,14 @@ export default function (pi: ExtensionAPI) {
     return context.thinkingLevel || "off";
   }
 
-  function getContextInfo(ctx: any): { percentage: number; used: number; total: number } {
+  function getContextInfo(ctx: any): ContextInfo {
+    if (typeof ctx.getContextUsage !== "function") return getLastResponseContextInfo(ctx);
+    const usage = ctx.getContextUsage();
+    if (!usage) return { percentage: 0, used: 0, total: 0 };
+    return { percentage: usage.percent, used: usage.tokens, total: usage.contextWindow };
+  }
+
+  function getLastResponseContextInfo(ctx: any): ContextInfo {
     const model = ctx.model;
     const contextWindow = model?.contextWindow ?? 0;
     if (contextWindow === 0) return { percentage: 0, used: 0, total: 0 };
