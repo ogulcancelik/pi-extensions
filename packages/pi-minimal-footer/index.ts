@@ -1042,6 +1042,14 @@ export default function (pi: ExtensionAPI) {
     return wrapFooterSegments(segments, width, sep);
   }
 
+  function renderExtensionStatuses(statuses: ReadonlyMap<string, string>): string {
+    return Array.from(statuses.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim())
+      .filter(Boolean)
+      .join(" ");
+  }
+
   function getThinkingLevel(ctx: any): string {
     const entries = ctx.sessionManager.getEntries();
     const leafId = ctx.sessionManager.getLeafId();
@@ -1248,6 +1256,9 @@ export default function (pi: ExtensionAPI) {
           if (latestUsage && latestUsage.windows.length > 0) {
             lines.push(...renderUsageLine(latestUsage, width, theme));
           }
+
+          const statusLine = renderExtensionStatuses(footerData.getExtensionStatuses?.() ?? new Map());
+          if (statusLine) lines.push(statusLine);
 
           return lines.map((line) => truncateToWidth(line, width));
         },

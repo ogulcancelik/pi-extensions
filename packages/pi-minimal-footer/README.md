@@ -12,6 +12,7 @@ Minimal footer for [pi](https://github.com/earendil-works/pi) that replaces the 
 - **Subscription usage bars** — rolling window quotas with reset timers for supported providers
 - **Shared usage cache** — all pi instances share one cached result per provider and account, so opening more sessions doesn't mean more quota API calls
 - **Git integration** — branch name, dirty state, ahead/behind counts
+- **Extension statuses** — text that other extensions set with `ctx.ui.setStatus()`, on its own line like pi's default footer
 
 ## Supported providers
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import extension from "./index.ts";
 
 let home: string;
 
@@ -33,6 +34,51 @@ function checkAuth(agentDir: string | undefined, expected: Record<string, unknow
   expect(result.status).toBe(0);
   expect(result.stdout.trim()).toBe("true");
 }
+
+async function startFooterWithStatuses(statuses?: Map<string, string>) {
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+  extension({ on: (event: string, handler: any) => handlers.set(event, handler) } as any);
+  let factory: any;
+  await handlers.get("session_start")!(
+    {},
+    {
+      hasUI: true,
+      cwd: "/tmp",
+      model: { provider: "cursor", id: "grok-4.7", contextWindow: 256000, reasoning: false },
+      sessionManager: { getEntries: () => [], getLeafId: () => null },
+      ui: { setFooter: (f: unknown) => (factory = f) },
+    },
+  );
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const footerData = statuses
+    ? { onBranchChange: () => () => {}, getExtensionStatuses: () => statuses }
+    : { onBranchChange: () => () => {} };
+  return factory({ requestRender() {} }, theme, footerData);
+}
+
+describe("extension statuses", () => {
+  test("shows extension statuses on their own line, sorted by key", async () => {
+    const statuses = new Map([
+      ["tps", "TPS: 74.2 tok/s"],
+      ["herdr-worktree-jump", "creating\n\tworktree"],
+    ]);
+    const footer = await startFooterWithStatuses(statuses);
+    expect(footer.render(200).at(-1)).toBe("creating worktree TPS: 74.2 tok/s");
+    statuses.delete("herdr-worktree-jump");
+    expect(footer.render(200).at(-1)).toBe("TPS: 74.2 tok/s");
+    footer.dispose();
+  });
+
+  test("adds no line without extension statuses", async () => {
+    for (const statuses of [new Map<string, string>(), undefined]) {
+      const footer = await startFooterWithStatuses(statuses);
+      const lines = footer.render(200);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("ctx ");
+      footer.dispose();
+    }
+  });
+});
 
 describe("footer auth directory", () => {
   test("reads credentials from the default agent directory", () => {
