@@ -46,7 +46,7 @@ Accepted false values: `0`, `false`, `no`, `off` (case-insensitive).
 
 ## How it works
 
-The footer reads context usage from the last assistant message's token counts (free — comes with every LLM response). Subscription usage is fetched from each provider's dedicated quota API using your existing auth tokens from Pi's agent directory (`~/.pi/agent/auth.json` by default) or environment variables.
+The footer reads context usage from pi's `ctx.getContextUsage()`, the same value as pi's default footer: the token counts of the last response, plus an estimate for the messages after it. After a compaction, pi does not know the new size until the next response, so the gauge shows `?/<window>`, like pi's default footer. Subscription usage is fetched from each provider's dedicated quota API using your existing auth tokens from Pi's agent directory (`~/.pi/agent/auth.json` by default) or environment variables.
 
 Usage is cached in `~/.pi/agent/pi-minimal-footer/` and shared by every pi instance. Each instance re-reads the cache on startup, on model switch (Ctrl+P), and every 30 seconds. Only one instance fetches when the cache is older than 5 minutes. Failed fetches keep the last good numbers and retry after a minute, or after the provider's `retry-after` when rate-limited.
 
