@@ -26,6 +26,23 @@ Minimal footer for [pi](https://github.com/earendil-works/pi) that replaces the 
 | Kimi Coding    | 5h + weekly rolling windows (Plan)                     |
 | OpenCode Go    | 5h + weekly + monthly usage windows                    |
 
+### OpenAI Codex / ChatGPT models
+
+On pi < 1.0.0 the Codex subscription was detected via the `openai-codex`
+provider. Pi 1.0.0 serves those models as provider `openai` (ChatGPT OAuth with
+the token sent directly to `api.openai.com`), and that direct token is rejected
+by the `chatgpt.com` usage endpoint. The footer therefore resolves usage
+credentials in this order:
+
+1. `auth["openai-codex"].access` (pi < 1.0.0 OAuth login)
+2. `codex login` credentials (`~/.codex/auth.json`) — same account, works with
+   the usage endpoint
+3. `auth["openai"].access` (pi 1.0.0 direct token; currently rejected, kept as
+   a fallback)
+
+If none of these can access the usage endpoint (for example a plain OpenAI API
+key and no codex CLI login), no usage bar is shown.
+
 ## Install
 
 ```bash
