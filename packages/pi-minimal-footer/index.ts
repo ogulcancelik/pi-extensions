@@ -121,10 +121,14 @@ function refreshGitCache(): boolean {
   let next: GitCache | null = null;
 
   try {
-    const status = execSync("git status --porcelain=v2 --branch 2>/dev/null", {
-      encoding: "utf8",
-      timeout: 1000,
-    });
+    const status = execSync(
+      "git status --porcelain=v2 --branch",
+      {
+        encoding: "utf8",
+        timeout: 1000,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
     next = parseGitStatus(status.trimEnd());
   } catch {
     next = null;
