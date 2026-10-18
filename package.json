@@ -27,6 +27,7 @@
       "./packages/pi-spar/index.ts",
       "./packages/pi-ssh-tools/index.ts",
       "./packages/pi-tmux/index.ts",
+      "./packages/pi-tool-groups/index.ts",
       "./packages/pi-worktree/index.ts"
     ],
     "skills": [

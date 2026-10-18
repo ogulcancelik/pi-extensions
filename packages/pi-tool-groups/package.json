@@ -1,0 +1,45 @@
+{
+  "name": "@ogulcancelik/pi-tool-groups",
+  "version": "0.1.0",
+  "description": "Shows each pi tool call as one line with a status mark. Click a line to see its output.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tools",
+    "transcript",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-tool-groups"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-tool-groups#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "assets/screenshot.png",
+    "README.md",
+    "LICENSE"
+  ]
+}

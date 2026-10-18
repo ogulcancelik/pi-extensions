@@ -13,6 +13,7 @@ This is my working collection rather than a single polished suite. Some extensio
 | [pi-codex-compaction](packages/pi-codex-compaction) | Native OpenAI Codex compaction; Pi 0.84.4+ resumes in-run, with a safe fallback for older Pi | 🔥 Core |
 | [pi-herdr-worktree-jump](packages/pi-herdr-worktree-jump) | Jump the active Pi session into a new Herdr worktree or back to its main checkout | 🔥 Core |
 | [pi-anthropic-image-cap](packages/pi-anthropic-image-cap) | Trim old images from Anthropic requests like Claude Code, so image-heavy sessions don't hit the 32 MB limit | 🔥 Core |
+| [pi-tool-groups](packages/pi-tool-groups) | One line per tool call with a status mark; click a line to see its output | 🔥 Core |
 | [pi-quit-and-delete](packages/pi-quit-and-delete) | Keyboard shortcut to quit pi and permanently delete the active session file | 🟠 Moderate |
 | [pi-ssh-tools](packages/pi-ssh-tools) | Toggle explicit SSH tools on demand via `/ssh` without replacing local tools | 🟠 Moderate |
 | [pi-fork-plus](packages/pi-fork-plus) | Fork from the session tree, including editable assistant-message forks | 🧪 Experimental |
