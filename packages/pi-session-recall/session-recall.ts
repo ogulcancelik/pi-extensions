@@ -180,16 +180,31 @@ async function completeRecallRequest(
 	context: Parameters<typeof complete>[1],
 	options: NonNullable<Parameters<typeof complete>[2]>,
 ): ReturnType<typeof complete> {
-	if (model.provider !== "openai-codex") return complete(model, context, options);
+	const isCodex = model.provider === "openai-codex";
+	if (!isCodex && !model.provider.startsWith("opencode")) return complete(model, context, options);
 
+	// Recall runs on a fresh id, off the live session: codex routes stateful
+	// requests by session id over websocket, and opencode's gateway requires
+	// x-opencode-session (pi core adds it on the main request path, which
+	// extension complete() calls bypass, hence MissingSessionID).
 	const sessionId = createUuidV7();
 	try {
 		return await complete(model, context, {
 			...options,
 			sessionId,
-			transport: "websocket",
+			...(isCodex
+				? { transport: "websocket" as const }
+				: {
+						headers: {
+							...options.headers,
+							"x-opencode-session": sessionId,
+							"x-opencode-client": "pi",
+						},
+					}),
 		});
 	} finally {
+		// Releases session-scoped resources opened under this id (codex
+		// websocket); a no-op for providers that opened none.
 		cleanupSessionResources(sessionId);
 	}
 }
