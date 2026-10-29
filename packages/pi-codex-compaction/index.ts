@@ -207,7 +207,11 @@ export function registerCodexCompactionExtension(pi: ExtensionAPI, hostVersion =
 		try {
 			if (checkpoint.status === "none") return undefined;
 			const input = effectiveInputForBranch({ branch, model, tools: pi.getAllTools() });
-			const payload: JsonObject = { ...event.payload, input };
+			// Pi can declare tools in developer input items instead of the top-level tools field.
+			const systemItems = Array.isArray(event.payload.input)
+				? event.payload.input.filter((item) => isJsonObject(item) && (item.role === "developer" || item.role === "system"))
+				: [];
+			const payload: JsonObject = { ...event.payload, input: [...systemItems, ...input] };
 			delete payload.messages;
 			delete payload.previous_response_id;
 			return payload;

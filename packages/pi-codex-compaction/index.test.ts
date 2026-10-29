@@ -257,6 +257,49 @@ describe("pi-codex-compaction", () => {
 		expect(filteredContext.messages[0].role).toBe("user");
 	});
 
+	test("preserves Pi's in-band tools and system updates after resuming a native checkpoint", async () => {
+		const checkpoint = nativeCheckpoint("checkpoint", null);
+		const next = { ...userEntry("next", "continue"), parentId: "checkpoint" } as SessionEntry;
+		const harness = extensionHarness([checkpoint, next], "1.4.0");
+		const configuration = [
+			{
+				type: "additional_tools", role: "developer",
+				tools: [
+					{ type: "function", name: "read", parameters: { type: "object" }, strict: null },
+					{ type: "custom", name: "codemode", format: { type: "grammar", syntax: "lark", definition: "start: /.+/" } },
+				],
+			},
+			{ role: "developer", content: "The following tools are no longer available. Do not call them:\n- write" },
+			{ role: "system", content: "Do not modify files without approval." },
+		];
+		const payload = {
+			model: model.id,
+			input: [configuration[0], { role: "user", content: "local marker" }, ...configuration.slice(1)],
+		};
+		const original = structuredClone(payload);
+		const patched = await harness.handlers.get("before_provider_request")!({ payload }, harness.context);
+
+		expect(patched.input).toEqual([
+			...configuration,
+			{ type: "compaction", encrypted_content: "opaque" },
+			{ role: "user", content: [{ type: "input_text", text: "continue" }] },
+		]);
+		expect(payload).toEqual(original);
+		expect(patched.tools).toBeUndefined();
+		expect(harness.aborted).toBe(false);
+	});
+
+	test("keeps legacy top-level tools when replacing checkpoint history", async () => {
+		const harness = extensionHarness([nativeCheckpoint("checkpoint", null)]);
+		const tools = [{ type: "function", name: "read", parameters: { type: "object" }, strict: null }];
+		const patched = await harness.handlers.get("before_provider_request")!({
+			payload: { model: model.id, tools, input: [{ role: "user", content: "local marker" }] },
+		}, harness.context);
+
+		expect(patched.tools).toEqual(tools);
+		expect(patched.input).toEqual([{ type: "compaction", encrypted_content: "opaque" }]);
+	});
+
 	test("cancels Pi compaction instead of falling back to text summarization", async () => {
 		globalThis.fetch = (async () => new Response("bad request", { status: 400 })) as typeof fetch;
 		const entry = userEntry("user-1", "hello");
