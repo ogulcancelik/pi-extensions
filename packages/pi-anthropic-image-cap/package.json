@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-anthropic-image-cap",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Trim old images from Anthropic requests the way Claude Code does, so image-heavy sessions never hit the request size limit.",
   "type": "module",
   "keywords": [

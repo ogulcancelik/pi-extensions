@@ -5,12 +5,13 @@ type MediaMessage = Extract<AgentMessage, { role: "user" | "toolResult" | "custo
 type Block = Exclude<MediaMessage["content"], string>[number];
 type TextContent = Extract<Block, { type: "text" }>;
 
-// Constants from Claude Code 2.1.282, which trims media the same way before every request.
+// Count limits and batching from Claude Code 2.1.282, which trims media the same way before every request.
+// The byte cap follows the API's 128 MiB request limit, keeping Claude Code's 8 MiB of room for non-image content.
 const MIB = 1024 * 1024;
 export const MAX_IMAGES = 100;
 export const MAX_IMAGES_1M_CONTEXT = 600;
 export const COUNT_DROP_BATCH = 20;
-export const IMAGE_BYTE_CAP = 32 * MIB - 8 * MIB;
+export const IMAGE_BYTE_CAP = 128 * MIB - 8 * MIB;
 export const BYTE_CAP_HYSTERESIS = 10 * MIB;
 export const PLACEHOLDER_TEXT = "[media removed: request limit]";
 
