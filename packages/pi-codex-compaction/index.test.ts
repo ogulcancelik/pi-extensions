@@ -257,6 +257,33 @@ describe("pi-codex-compaction", () => {
 		expect(filteredContext.messages[0].role).toBe("user");
 	});
 
+	test("preserves input-level tool declarations after native compaction", async () => {
+		const harness = extensionHarness([nativeCheckpoint("compact-1", null)]);
+		const declaration = {
+			type: "additional_tools",
+			role: "developer",
+			tools: [{
+				type: "custom",
+				name: "bash",
+				description: "Run a shell command",
+				format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+			}],
+		};
+		const payload = {
+			model: model.id,
+			input: [declaration, { role: "user", content: "local marker" }],
+		};
+
+		const result = await harness.handlers.get("before_provider_request")!({ payload }, harness.context);
+
+		expect(result.tools).toBeUndefined();
+		expect(result.input).toEqual([
+			declaration,
+			{ type: "compaction", encrypted_content: "opaque" },
+		]);
+		expect(payload.input).toEqual([declaration, { role: "user", content: "local marker" }]);
+	});
+
 	test("cancels Pi compaction instead of falling back to text summarization", async () => {
 		globalThis.fetch = (async () => new Response("bad request", { status: 400 })) as typeof fetch;
 		const entry = userEntry("user-1", "hello");
