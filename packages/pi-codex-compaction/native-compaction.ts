@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
 	buildContextEntries,
 	buildSessionContext,
@@ -316,6 +317,67 @@ function assertCheckpointNotInvalidated(branch: SessionEntry[], checkpoint: Nati
 	}
 }
 
+/**
+ * Replaces the conversation messages the checkpoint covers with one placeholder.
+ * Covered messages are matched exactly, not by timestamp: a message queued during compaction
+ * keeps its earlier timestamp but belongs after the checkpoint. System messages always stay,
+ * so Pi still serializes its own prompt and tool declarations.
+ */
+export function replaceCheckpointedMessages<T extends { role: string }>(
+	messages: T[],
+	covered: unknown[],
+	placeholder: T,
+): T[] {
+	const remaining = [...covered];
+	const result: T[] = [];
+	let placed = false;
+	for (const message of messages) {
+		const coveredIndex = message.role === "system"
+			? -1
+			: remaining.findIndex((candidate) => isDeepStrictEqual(candidate, message));
+		if (coveredIndex < 0) {
+			result.push(message);
+			continue;
+		}
+		remaining.splice(coveredIndex, 1);
+		if (!placed) {
+			result.push(placeholder);
+			placed = true;
+		}
+	}
+	if (!placed) {
+		const firstConversation = result.findIndex((message) => message.role !== "system");
+		result.splice(firstConversation < 0 ? result.length : firstConversation, 0, placeholder);
+	}
+	return result;
+}
+
+/** Swaps the serialized placeholder for the checkpoint history, leaving Pi's other items untouched. */
+export function spliceCheckpointHistory(input: unknown, marker: string, history: ResponseItem[]): ResponseItem[] {
+	const placeholder = { role: "user", content: [{ type: "input_text", text: marker }] };
+	const items = Array.isArray(input) ? input as ResponseItem[] : [];
+	const matches = items.flatMap((item, index) => isDeepStrictEqual(item, placeholder) ? [index] : []);
+	if (matches.length !== 1) {
+		throw new Error("Could not place the OpenAI Codex native compaction checkpoint in Pi's request.");
+	}
+	const index = matches[0]!;
+	return [...items.slice(0, index), ...history.map(cloneItem), ...items.slice(index + 1)];
+}
+
+/** The latest native checkpoint on the branch, or undefined; throws if it cannot be replayed for this model. */
+export function usableNativeCheckpoint(branch: SessionEntry[], model: Model<any>): NativeCheckpoint | undefined {
+	const checkpoint = findNativeCheckpoint(branch);
+	if (checkpoint.status === "none") return undefined;
+	if (checkpoint.status === "invalid") {
+		throw new Error("The latest OpenAI Codex native compaction checkpoint is malformed.");
+	}
+	if (checkpoint.checkpoint.details.modelKey !== modelKey(model)) {
+		throw new Error("The latest OpenAI Codex native compaction checkpoint belongs to a different model.");
+	}
+	assertCheckpointNotInvalidated(branch, checkpoint.checkpoint);
+	return checkpoint.checkpoint;
+}
+
 export function effectiveInputForBranch(params: {
 	branch: SessionEntry[];
 	model: Model<any>;
@@ -337,18 +399,11 @@ export function effectiveInputForBranch(params: {
 		}
 	}
 
-	const checkpoint = findNativeCheckpoint(branch);
-	if (checkpoint.status === "invalid") {
-		throw new Error("The latest OpenAI Codex native compaction checkpoint is malformed.");
-	}
-	if (checkpoint.status === "valid") {
-		if (checkpoint.checkpoint.details.modelKey !== modelKey(params.model)) {
-			throw new Error("The latest OpenAI Codex native compaction checkpoint belongs to a different model.");
-		}
-		assertCheckpointNotInvalidated(branch, checkpoint.checkpoint);
-		const tail = branch.slice(checkpoint.checkpoint.entryIndex + 1);
+	const checkpoint = usableNativeCheckpoint(branch, params.model);
+	if (checkpoint) {
+		const tail = branch.slice(checkpoint.entryIndex + 1);
 		return [
-			...checkpoint.checkpoint.details.replacementHistory.map(cloneItem),
+			...checkpoint.details.replacementHistory.map(cloneItem),
 			...entriesToResponseItems(params.model, tail, params.tools),
 		];
 	}

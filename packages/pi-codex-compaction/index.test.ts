@@ -81,6 +81,7 @@ function extensionHarness(initialBranch: SessionEntry[], hostVersion = "0.84.4")
 	const handlers = new Map<string, (...args: any[]) => any>();
 	const entryRenderers = new Map<string, (...args: any[]) => any>();
 	let branch = initialBranch;
+	let projection: Array<{ sourceEntry: SessionEntry; messages: unknown[] }> = [];
 	let abortCount = 0;
 	let hasPendingMessages = false;
 	let idle = false;
@@ -135,6 +136,7 @@ function extensionHarness(initialBranch: SessionEntry[], hostVersion = "0.84.4")
 		sessionManager: {
 			getSessionId: () => "session-123",
 			getBranch: () => branch,
+			buildSessionProjection: () => ({ entries: projection }),
 		},
 		modelRegistry: {
 			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: token(), headers: {} }),
@@ -147,6 +149,7 @@ function extensionHarness(initialBranch: SessionEntry[], hostVersion = "0.84.4")
 		handlers,
 		context,
 		setBranch(next: SessionEntry[]) { branch = next; },
+		setProjection(next: typeof projection) { projection = next; },
 		setHasPendingMessages(pending: boolean) { hasPendingMessages = pending; },
 		setIdle(value: boolean) { idle = value; },
 		setUsageTokens(tokens: number) { usageTokens = tokens; },
@@ -246,15 +249,96 @@ describe("pi-codex-compaction", () => {
 		});
 		expect(patched.input[1]).toEqual({ type: "compaction", id: "cmp_1", encrypted_content: "opaque-state" });
 		expect(patched.input[2]).toMatchObject({ role: "user" });
+	});
 
-		const filteredContext = harness.handlers.get("context")!({
-			messages: [
-				{ role: "compactionSummary", summary: result.compaction.summary },
-				{ role: "user", content: [{ type: "text", text: "What was the code?" }] },
-			],
-		}, harness.context);
-		expect(filteredContext.messages).toHaveLength(1);
-		expect(filteredContext.messages[0].role).toBe("user");
+	describe("with Pi serializing the request", () => {
+		const checkpointTime = Date.parse("2026-11-01T12:00:00.000Z");
+		const checkpoint = {
+			...nativeCheckpoint("checkpoint", "kept", "kept"),
+			timestamp: new Date(checkpointTime).toISOString(),
+		} as SessionEntry;
+		const kept = { ...userEntry("kept", "before"), parentId: null } as SessionEntry;
+		const queued = { ...userEntry("queued", "queued"), parentId: "checkpoint" } as SessionEntry;
+		const branch = [kept, checkpoint, queued];
+		const system = (text: string, timestamp: number) => ({ role: "system", content: text, timestamp });
+		const summaryMessage = { role: "compactionSummary", summary: "local marker", timestamp: checkpointTime };
+		const keptMessage = { role: "user", content: "kept before checkpoint", timestamp: checkpointTime - 2_000 };
+		// Queued while compaction ran: saved after the checkpoint but stamped before it.
+		const queuedMessage = { role: "user", content: "queued during compaction", timestamp: checkpointTime - 1_000 };
+
+		const context = async (harness: ReturnType<typeof extensionHarness>, messages: any[]) =>
+			(await harness.handlers.get("context_with_system")!({ messages }, harness.context))?.messages;
+
+		test("hides pre-checkpoint conversation behind one placeholder and keeps system updates in place", async () => {
+			const harness = extensionHarness(branch, "1.5.0");
+			harness.setProjection([
+				{ sourceEntry: checkpoint, messages: [system("snapshot", checkpointTime), summaryMessage] },
+				{ sourceEntry: kept, messages: [keptMessage] },
+				{ sourceEntry: queued, messages: [queuedMessage] },
+			]);
+			const messages = await context(harness, [
+				system("snapshot", checkpointTime),
+				structuredClone(summaryMessage),
+				structuredClone(keptMessage),
+				structuredClone(queuedMessage),
+				{ role: "user", content: "after", timestamp: checkpointTime + 1_000 },
+				system("tools changed", checkpointTime + 2_000),
+				{ role: "assistant", content: [], timestamp: checkpointTime + 3_000 },
+			]);
+
+			expect(messages.map((message: any) => message.content)).toEqual([
+				"snapshot",
+				[{ type: "text", text: expect.stringContaining("OpenAI Codex native compaction history") }],
+				"queued during compaction",
+				"after",
+				"tools changed",
+				[],
+			]);
+		});
+
+		test("swaps only the placeholder and keeps Pi's tool declarations and notices in order", async () => {
+			const harness = extensionHarness(branch, "1.5.0");
+			const messages = await context(harness, [system("snapshot", checkpointTime)]);
+			const marker = messages[1].content[0].text;
+			const tools = { type: "additional_tools", role: "developer", tools: [{ type: "custom", name: "codemode" }] };
+			const removal = { role: "developer", content: "The following tools are no longer available. Do not call them:\n- write" };
+			const after = { role: "user", content: [{ type: "input_text", text: "after" }] };
+			const payload = {
+				model: model.id,
+				input: [tools, { role: "user", content: [{ type: "input_text", text: marker }] }, after, removal],
+			};
+			const original = structuredClone(payload);
+
+			const patched = await harness.handlers.get("before_provider_request")!({ payload }, harness.context);
+
+			expect(patched.input).toEqual([tools, { type: "compaction", encrypted_content: "opaque" }, after, removal]);
+			expect(payload).toEqual(original);
+			expect(harness.aborted).toBe(false);
+
+			const retried = await harness.handlers.get("before_provider_request")!({ payload }, harness.context);
+			expect(retried.input).toEqual(patched.input);
+		});
+
+		test("blocks the request when Pi's request lost the placeholder", async () => {
+			const harness = extensionHarness(branch, "1.5.0");
+			await context(harness, [system("snapshot", checkpointTime)]);
+			const patched = await harness.handlers.get("before_provider_request")!({
+				payload: { model: model.id, input: [{ role: "user", content: [{ type: "input_text", text: "after" }] }] },
+			}, harness.context);
+
+			expect(harness.aborted).toBe(true);
+			expect(patched.input).toEqual([]);
+		});
+
+		test("blocks the request when the context hook never ran", async () => {
+			const harness = extensionHarness(branch, "1.5.0");
+			const patched = await harness.handlers.get("before_provider_request")!({
+				payload: { model: model.id, input: [] },
+			}, harness.context);
+
+			expect(harness.aborted).toBe(true);
+			expect(patched.input).toEqual([]);
+		});
 	});
 
 	test("cancels Pi compaction instead of falling back to text summarization", async () => {
