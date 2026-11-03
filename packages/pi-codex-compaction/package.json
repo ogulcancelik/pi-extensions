@@ -1,6 +1,6 @@
 {
   "name": "@ogulcancelik/pi-codex-compaction",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "OpenAI Codex native remote compaction for Pi's existing compaction lifecycle.",
   "type": "module",
   "keywords": [
