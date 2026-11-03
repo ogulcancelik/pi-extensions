@@ -39,6 +39,7 @@ Use `herdr_layout` to inspect and create workspaces, tabs, and pane topology.
 | Action | Description |
 |---|---|
 | `current` | Inspect the pane running the current Pi process |
+| `machine_list` | List saved Herdr SSH machines |
 | `workspace_list` | List workspaces |
 | `workspace_create` | Create a workspace, first tab, and root pane |
 | `workspace_focus` | Focus a workspace |
@@ -142,6 +143,33 @@ Read the result:
 
 For an ordinary command, split a pane with `herdr_layout`, submit the command with `herdr_pane run`, then use `herdr_pane wait_output` or `herdr_pane read`.
 
+## Saved SSH machines
+
+Every tool accepts an optional `machine`: the label or ID of a machine saved with `herdr machine add`. Without it, tools target the local Herdr server. With it, each call runs as `herdr --machine <machine> ...` against that machine's session.
+
+Find saved machines first:
+
+```json
+{ "action": "machine_list" }
+```
+
+Then pass the label to every call for that machine:
+
+```json
+{ "action": "list", "machine": "devbox" }
+```
+
+Workspace, tab, and pane IDs belong to one machine. `w1:p1` on a remote machine is unrelated to `w1:p1` locally.
+
+The caller's pane is local, so nothing defaults to it on a remote machine:
+
+- `current` is local only.
+- `pane_split` and `pane_layout` require `pane`.
+- `tab_create` requires `workspace`.
+- `pane_list` without `workspace` lists every pane on the machine.
+- Creation actions pass `cwd` only when given, or for `pane_split`, the source pane's cwd. Otherwise the remote server picks.
+- `close` does not apply the caller-pane guard.
+
 ## Invocation policy
 
 The tools are opt-in. Pi uses them only when the user explicitly mentions Herdr or asks to inspect or control Herdr. Installing this package does not turn general background work or delegation into a Herdr workflow.
@@ -158,6 +186,7 @@ Full-screen agents may render through the terminal's alternate screen. Rows that
 
 - Pi 0.80 or newer
 - Herdr 0.7.5 or newer
+- Herdr 0.9.1 or newer on both machines to use `machine`
 - Pi running inside a Herdr pane
 
 ## License
