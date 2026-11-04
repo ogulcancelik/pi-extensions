@@ -180,14 +180,13 @@ async function completeRecallRequest(
 	context: Parameters<typeof complete>[1],
 	options: NonNullable<Parameters<typeof complete>[2]>,
 ): ReturnType<typeof complete> {
-	if (model.provider !== "openai-codex") return complete(model, context, options);
-
+	// A fresh id keeps recall off the live session; providers like OpenCode require one.
 	const sessionId = createUuidV7();
 	try {
 		return await complete(model, context, {
 			...options,
 			sessionId,
-			transport: "websocket",
+			...(model.provider === "openai-codex" ? { transport: "websocket" as const } : {}),
 		});
 	} finally {
 		cleanupSessionResources(sessionId);
