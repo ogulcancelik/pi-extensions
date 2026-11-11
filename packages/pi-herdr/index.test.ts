@@ -54,7 +54,11 @@ const plainTheme = {
 	fg: (_color: string, text: string) => text,
 };
 
+// Which Herdr runs is read from the environment; the test runner's own (it may run in either) must not leak in.
+const savedTerminal = process.env.HC_TERMINAL_ID;
+
 beforeEach(() => {
+	delete process.env.HC_TERMINAL_ID;
 	process.env.HERDR_ENV = "1";
 	process.env.HERDR_PANE_ID = currentPane.pane_id;
 });
@@ -62,6 +66,8 @@ beforeEach(() => {
 afterEach(() => {
 	delete process.env.HERDR_ENV;
 	delete process.env.HERDR_PANE_ID;
+	if (savedTerminal === undefined) delete process.env.HC_TERMINAL_ID;
+	else process.env.HC_TERMINAL_ID = savedTerminal;
 });
 
 describe("pi-herdr", () => {
