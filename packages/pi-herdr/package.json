@@ -1,7 +1,7 @@
 {
   "name": "@ogulcancelik/pi-herdr",
   "version": "0.4.1",
-  "description": "Pi-native tools for controlling Herdr layouts, panes, and coding agents.",
+  "description": "Pi-native tools for controlling Herdr (the TUI or the app) layouts, panes, and coding agents.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -43,6 +43,10 @@
   },
   "files": [
     "index.ts",
+    "herdr.ts",
+    "tools.ts",
+    "tui.ts",
+    "app.ts",
     "README.md",
     "LICENSE"
   ]

@@ -1,6 +1,6 @@
 # pi-herdr
 
-Pi-native tools for controlling [Herdr](https://github.com/ogulcancelik/herdr) layouts, terminal panes, and coding agents.
+Pi-native tools for controlling [Herdr](https://github.com/ogulcancelik/herdr) layouts, terminal panes, and coding agents, in the herdr TUI or the [Herdr app](https://herdr.dev).
 
 ## Install
 
@@ -16,7 +16,12 @@ Or add the package to `~/.pi/agent/settings.json`:
 }
 ```
 
-The extension activates only when Pi runs inside a Herdr-managed pane with `HERDR_ENV=1` and `HERDR_PANE_ID` set.
+The extension activates only when Pi runs inside Herdr:
+
+- a herdr TUI pane (`HERDR_ENV=1` and `HERDR_PANE_ID` set), driven through the `herdr` CLI;
+- a Herdr app terminal (`HC_TERMINAL_ID` set by herdr-core), driven through `herdr-app` and `hc`.
+
+The tools are the same in both. In the app, workspaces are spaces and IDs are the app's own (`sp…`, `tb…`, `p…`).
 
 This package provides structured Pi tools only. It does not bundle Herdr's standalone agent skill. Install that skill separately when you want direct access to the complete installed CLI.
 
@@ -148,6 +153,22 @@ The tools are opt-in. Pi uses them only when the user explicitly mentions Herdr 
 
 The default topology is a sibling pane in the caller's current tab and working directory. Focus remains with the user. Another tab, workspace, worktree, or working directory is used only when requested.
 
+## In the Herdr app
+
+The app's CLIs cover the same three primitives, with these differences:
+
+| Action | In the app |
+|---|---|
+| `herdr_layout pane_layout` | Not available: the app reports no pane geometry. `pane_split` chooses its direction from the pane's terminal size instead. |
+| `herdr_pane send_text` | Not available: herdr-core types text only with Enter. Use `run`, or `send_keys`. |
+| `read` with `source: "detection"` or `format: "ansi"` | Not available: herdr-core reads plain text. |
+| `herdr_pane wait_output` | Polls the pane's output every 500 ms (a regular expression is a JavaScript one). |
+| `herdr_agent start` | Types the agent's command line into the pane's shell; arguments containing a single quote are refused. |
+| `herdr_agent read` on a working agent | herdr-core returns only the screen until the agent stops; the read says so. |
+| agent names | Kept as the terminal label `pi-herdr.name`. |
+
+Creating a workspace, tab, or pane shows it in the app; without `focus: true`, the focus goes back to the pane it was on.
+
 ## Output limits
 
 Read output is truncated to the last 2,000 lines or 50KB, whichever is reached first.
@@ -157,7 +178,7 @@ Full-screen agents may render through the terminal's alternate screen. Rows that
 ## Requirements
 
 - Pi 0.80 or newer
-- Herdr 0.7.5 or newer
+- Herdr 0.7.5 or newer, or the Herdr app with herdr-core (`herdr-app` and `hc` on `PATH`)
 - Pi running inside a Herdr pane
 
 ## License
